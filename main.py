@@ -12,7 +12,7 @@ import base64
 import os
 
 from state import (
-    load_state, save_state, CONFIG, logger, AUTH, DEFAULT_PASSWORD, FIRST_RUN,
+    load_state, save_state, CONFIG, logger, AUTH, DEFAULT_PASSWORD,
     LINKS, is_link_allowed, is_ip_allowed, connections, error_logs,
     get_all_links_for_uuid, make_link, remove_link, update_link,
     log_activity, set_first_run_password, is_first_run
@@ -37,10 +37,8 @@ active_tokens = {}
 
 def verify_auth(credentials: HTTPBasicCredentials = Depends(security_basic)):
     """بررسی احراز هویت با Basic Auth"""
-    # اگر رمز تنظیم نشده، اجازه دسترسی بده
     if is_first_run():
         return True
-    
     password_hash = hashlib.sha256(credentials.password.encode()).hexdigest()
     if AUTH["password_hash"] != password_hash:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -48,49 +46,28 @@ def verify_auth(credentials: HTTPBasicCredentials = Depends(security_basic)):
 
 def verify_token(authorization: str = Header(None)):
     """بررسی توکن از هدر Authorization"""
-    # اگر رمز تنظیم نشده، اجازه دسترسی بده
     if is_first_run():
         return True
-    
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
-    
     if authorization.startswith("Bearer "):
         token = authorization[7:]
     else:
         token = authorization
-    
     if token not in active_tokens:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
     if active_tokens[token] < datetime.now():
         del active_tokens[token]
         raise HTTPException(status_code=401, detail="Token expired")
-    
     return True
-
-def verify_auth_optional(authorization: str = Header(None)):
-    """بررسی اختیاری احراز هویت"""
-    # اگر رمز تنظیم نشده، اجازه دسترسی بده
-    if is_first_run():
-        return True
-    
-    if not authorization:
-        return False
-    
-    try:
-        return verify_token(authorization)
-    except:
-        return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting OXNet Core Server (Multi-Protocol Edition)...")
     await load_state()
     
-    # بررسی وضعیت اولین اجرا
     if is_first_run():
-        logger.info("⚠️  FIRST RUN: No password set! Please set a password via the setup page.")
+        logger.info("⚠️ FIRST RUN: No password set! Please set a password via the setup page.")
         print("\n" + "="*60)
         print("⚠️  FIRST RUN DETECTED - No password is set!")
         print("🔑 Please visit the panel and set your password.")
@@ -98,7 +75,6 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("✅ Password is set. Panel is secured.")
     
-    # اجرای تسک پس‌زمینه سرور شادوساکس
     if SS_ENABLED:
         from state import SS_PORT
         asyncio.create_task(start_shadowsocks_server(SS_PORT))
@@ -116,7 +92,6 @@ async def root():
 
 @app.get("/api/auth/status")
 async def auth_status():
-    """بررسی وضعیت احراز هویت"""
     return {
         "first_run": is_first_run(),
         "password_set": not is_first_run()
@@ -124,7 +99,6 @@ async def auth_status():
 
 @app.post("/api/auth/setup")
 async def setup_password(request: Request):
-    """تنظیم رمز عبور برای اولین بار"""
     try:
         data = await request.json()
         password = data.get("password", "")
@@ -138,14 +112,12 @@ async def setup_password(request: Request):
     if password != confirm:
         return JSONResponse({"ok": False, "error": "رمز عبور و تکرار آن مطابقت ندارند"}, status_code=400)
     
-    # تنظیم رمز عبور
     success = await set_first_run_password(password)
     if not success:
         return JSONResponse({"ok": False, "error": "خطا در تنظیم رمز عبور"}, status_code=500)
     
     log_activity("auth", "رمز عبور پنل برای اولین بار تنظیم شد", "ok")
     
-    # تولید توکن برای لاگین خودکار
     token = secrets.token_urlsafe(32)
     active_tokens[token] = datetime.now().replace(hour=23, minute=59, second=59)
     basic_token = base64.b64encode(f"admin:{token}".encode()).decode()
@@ -159,8 +131,6 @@ async def setup_password(request: Request):
 
 @app.post("/api/auth/login")
 async def login(request: Request):
-    """ورود به پنل و دریافت توکن"""
-    # اگر رمز تنظیم نشده، خطا بده
     if is_first_run():
         return JSONResponse({
             "ok": False, 
@@ -180,7 +150,6 @@ async def login(request: Request):
     if AUTH["password_hash"] != password_hash:
         return JSONResponse({"ok": False, "error": "رمز عبور اشتباه است"}, status_code=401)
     
-    # تولید توکن جدید
     token = secrets.token_urlsafe(32)
     active_tokens[token] = datetime.now().replace(hour=23, minute=59, second=59)
     basic_token = base64.b64encode(f"admin:{token}".encode()).decode()
@@ -194,7 +163,6 @@ async def login(request: Request):
 
 @app.post("/api/auth/change-password")
 async def change_password(request: Request, auth: bool = Depends(verify_token)):
-    """تغییر رمز عبور پنل"""
     data = await request.json()
     old_password = data.get("old_password", "")
     new_password = data.get("new_password", "")
@@ -215,7 +183,6 @@ async def change_password(request: Request, auth: bool = Depends(verify_token)):
 
 @app.get("/api/auth/default-password")
 async def get_default_password():
-    """دریافت وضعیت رمز پیش‌فرض"""
     if is_first_run():
         return {"first_run": True, "default_password": None}
     return {"first_run": False, "default_password": None}
@@ -246,12 +213,10 @@ async def get_link(uid: str, auth: bool = Depends(verify_token)):
 async def edit_link(uid: str, request: Request, auth: bool = Depends(verify_token)):
     if uid not in LINKS:
         return JSONResponse({"error": "لینک یافت نشد"}, status_code=404)
-    
     data = await request.json()
     updated = await update_link(uid, data)
     if not updated:
         return JSONResponse({"error": "خطا در ویرایش"}, status_code=400)
-    
     return {"ok": True, "link": updated}
 
 @app.delete("/api/panel/links/{uid}")
@@ -279,14 +244,11 @@ import base64
 async def render_sub(uid: str, request: Request):
     if uid not in LINKS:
         return PlainTextResponse("Config Not Found", status_code=404)
-        
     link = LINKS[uid]
     if not is_link_allowed(link):
         return PlainTextResponse("Config Expired or Limit Reached", status_code=403)
-        
     host = request.headers.get("host", CONFIG["host"])
     links = get_all_links_for_uuid(link, uid, host)
-    
     raw_text = "\n".join(links)
     encoded = base64.b64encode(raw_text.encode('utf-8')).decode('utf-8')
     return PlainTextResponse(encoded)
