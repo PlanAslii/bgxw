@@ -16,10 +16,22 @@ from relay_protocols import parse_vless_header, parse_trojan_header, check_and_u
 from speed_limit import throttle
 from pages import DASHBOARD_HTML
 
+try:
+    from shadowsocks_server import start_shadowsocks_server
+    SS_ENABLED = True
+except ImportError:
+    SS_ENABLED = False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting X4G Core Server (Dark Multi-Protocol Edition)...")
     await load_state()
+    
+    # اجرای تسک پس‌زمینه سرور شادوساکس
+    if SS_ENABLED:
+        from state import SS_PORT
+        asyncio.create_task(start_shadowsocks_server(SS_PORT))
+        
     yield
     logger.info("Shutting down X4G Core...")
     await save_state()
@@ -33,11 +45,14 @@ async def root():
 
 @app.get("/api/panel/stats")
 async def get_stats():
+    from state import get_system_stats
     total_vol = sum(l.get("used_bytes", 0) for l in LINKS.values())
     return {
         "total_links": len(LINKS),
         "total_traffic_bytes": total_vol,
-        "online_users": len(connections)
+        "online_users": len(connections),
+        "system": get_system_stats(),
+        "active_connections": list(connections.values())
     }
 
 @app.get("/api/panel/links")
