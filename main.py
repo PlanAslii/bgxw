@@ -1,15 +1,19 @@
 # main.py
 import asyncio
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from contextlib import asynccontextmanager
 from datetime import datetime
+import hashlib
+import secrets
 
 from state import (
-    load_state, save_state, CONFIG, logger,
+    load_state, save_state, CONFIG, logger, AUTH, DEFAULT_PASSWORD,
     LINKS, is_link_allowed, is_ip_allowed, connections, error_logs,
-    get_all_links_for_uuid, make_link, remove_link
+    get_all_links_for_uuid, make_link, remove_link, update_link,
+    log_activity
 )
 from xhttp_siz10 import router as xhttp_router
 from relay_protocols import parse_vless_header, parse_trojan_header, check_and_use
@@ -22,10 +26,24 @@ try:
 except ImportError:
     SS_ENABLED = False
 
+security = HTTPBasic()
+
+def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    """بررسی احراز هویت برای مسیرهای مدیریتی"""
+    password_hash = hashlib.sha256(credentials.password.encode()).hexdigest()
+    if AUTH["password_hash"] != password_hash:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return True
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting X4G Core Server (Dark Multi-Protocol Edition)...")
+    logger.info("Starting OXNet Core Server (Multi-Protocol Edition)...")
     await load_state()
+    
+    # نمایش رمز پیش‌فرض در صورت عدم تغییر
+    if not AUTH.get("password_changed", False):
+        logger.info(f"Default password: {DEFAULT_PASSWORD}")
+        print(f"\n⚠️  Default password: {DEFAULT_PASSWORD}\n")
     
     # اجرای تسک پس‌زمینه سرور شادوساکس
     if SS_ENABLED:
@@ -33,18 +51,58 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(start_shadowsocks_server(SS_PORT))
         
     yield
-    logger.info("Shutting down X4G Core...")
+    logger.info("Shutting down OXNet Core...")
     await save_state()
 
-app = FastAPI(title="X4G Xray Backend", lifespan=lifespan)
+app = FastAPI(title="OXNet Core", lifespan=lifespan)
 app.include_router(xhttp_router)
 
 @app.get("/")
 async def root():
     return HTMLResponse(DASHBOARD_HTML)
 
+@app.post("/api/auth/login")
+async def login(request: Request):
+    """ورود به پنل و دریافت توکن"""
+    data = await request.json()
+    password = data.get("password", "")
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    
+    if AUTH["password_hash"] != password_hash:
+        return JSONResponse({"ok": False, "error": "رمز عبور اشتباه است"}, status_code=401)
+    
+    # تولید توکن ساده (برای دمو)
+    token = secrets.token_urlsafe(32)
+    return {"ok": True, "token": token}
+
+@app.post("/api/auth/change-password")
+async def change_password(request: Request, auth: bool = Depends(verify_auth)):
+    """تغییر رمز عبور پنل"""
+    data = await request.json()
+    old_password = data.get("old_password", "")
+    new_password = data.get("new_password", "")
+    
+    if len(new_password) < 6:
+        return JSONResponse({"ok": False, "error": "رمز جدید باید حداقل 6 کاراکتر باشد"}, status_code=400)
+    
+    old_hash = hashlib.sha256(old_password.encode()).hexdigest()
+    if AUTH["password_hash"] != old_hash:
+        return JSONResponse({"ok": False, "error": "رمز فعلی اشتباه است"}, status_code=401)
+    
+    AUTH["password_hash"] = hashlib.sha256(new_password.encode()).hexdigest()
+    AUTH["password_changed"] = True
+    await save_state()
+    log_activity("auth", "رمز عبور پنل تغییر کرد", "ok")
+    
+    return {"ok": True, "message": "رمز عبور با موفقیت تغییر کرد"}
+
+@app.get("/api/auth/default-password")
+async def get_default_password():
+    """دریافت رمز پیش‌فرض پنل"""
+    return {"default_password": DEFAULT_PASSWORD if not AUTH.get("password_changed", False) else None}
+
 @app.get("/api/panel/stats")
-async def get_stats():
+async def get_stats(auth: bool = Depends(verify_auth)):
     from state import get_system_stats
     total_vol = sum(l.get("used_bytes", 0) for l in LINKS.values())
     return {
@@ -56,16 +114,35 @@ async def get_stats():
     }
 
 @app.get("/api/panel/links")
-async def get_links():
+async def get_links(auth: bool = Depends(verify_auth)):
     return {"links": LINKS}
 
+@app.get("/api/panel/links/{uid}")
+async def get_link(uid: str, auth: bool = Depends(verify_auth)):
+    if uid not in LINKS:
+        return JSONResponse({"error": "لینک یافت نشد"}, status_code=404)
+    return {"link": LINKS[uid]}
+
+@app.put("/api/panel/links/{uid}")
+async def edit_link(uid: str, request: Request, auth: bool = Depends(verify_auth)):
+    """ویرایش لینک"""
+    if uid not in LINKS:
+        return JSONResponse({"error": "لینک یافت نشد"}, status_code=404)
+    
+    data = await request.json()
+    updated = await update_link(uid, data)
+    if not updated:
+        return JSONResponse({"error": "خطا در ویرایش"}, status_code=400)
+    
+    return {"ok": True, "link": updated}
+
 @app.delete("/api/panel/links/{uid}")
-async def del_link(uid: str):
+async def del_link(uid: str, auth: bool = Depends(verify_auth)):
     res = await remove_link(uid)
     return {"ok": res is not None}
 
 @app.post("/api/panel/multipack")
-async def api_create_multipack(request: Request):
+async def api_create_multipack(request: Request, auth: bool = Depends(verify_auth)):
     data = await request.json()
     label = data.get("label", "MultiPack")
     limit_bytes = int(data.get("limit_gb", 0) * 1024**3)
@@ -105,6 +182,10 @@ async def vless_ws(websocket: WebSocket, uuid: str):
 async def trojan_ws(websocket: WebSocket, uuid: str):
     await _handle_ws_tunnel(websocket, uuid, "trojan")
 
+@app.websocket("/vmess-ws/{uuid}")
+async def vmess_ws(websocket: WebSocket, uuid: str):
+    await _handle_ws_tunnel(websocket, uuid, "vmess")
+
 # هسته مرکزی تونل زنی وب سوکت مشترک
 async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
     await websocket.accept()
@@ -128,8 +209,11 @@ async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
         
         if protocol == "vless":
             cmd, addr, port, payload = await parse_vless_header(first_packet)
-        else: # trojan
+        elif protocol == "trojan":
             cmd, addr, port, payload = await parse_trojan_header(first_packet, uuid)
+        else:  # vmess
+            # برای VMESS باید هدر جداگانه پیاده‌سازی شود
+            cmd, addr, port, payload = 1, "1.1.1.1", 443, first_packet
             
         reader, writer = await asyncio.open_connection(addr, port)
         if payload:
