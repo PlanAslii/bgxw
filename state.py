@@ -15,6 +15,12 @@ from urllib.parse import quote
 import logging
 from fastapi import Request
 
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("X4G-Core")
 
@@ -75,28 +81,28 @@ SUBS: dict = {}
 SUBS_LOCK = asyncio.Lock()
 
 # پروتکل‌های پشتیبانی شده برای جنریت شدن
-SUPPORTED_TRANSPORTS = ("vless-ws", "vless-xhttp", "trojan-ws", "trojan-xhttp")
+SUPPORTED_TRANSPORTS = ("vless-ws", "vless-xhttp", "trojan-ws", "trojan-xhttp", "shadowsocks")
 FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "random")
 DEFAULT_FINGERPRINT = "chrome"
 DEFAULT_PORT = 443
+SS_PORT = int(os.environ.get("SS_PORT", 8388)) # پورت اختصاصی شادوساکس
 
-def hash_password(pw: str) -> str:
-    return hashlib.sha256(f"{pw}{CONFIG['secret']}".encode()).hexdigest()
-
-AUTH = {"password_hash": hash_password(os.environ.get("ADMIN_PASSWORD", "X4GKING"))}
-SESSIONS: dict = {}
-
-def now_ir() -> datetime:
-    return datetime.now(IRAN_TZ)
-
-def log_activity(kind: str, message: str, level: str = "info"):
-    activity_logs.append({
-        "kind": kind,
-        "level": level,
-        "message": message,
-        "time": datetime.now().isoformat(),
-    })
-
+def get_system_stats():
+    """دریافت وضعیت زنده منابع سرور برای نمایش در داشبورد"""
+    stats = {"cpu": 0, "ram": 0, "ram_total": 0, "disk": 0}
+    if PSUTIL_AVAILABLE:
+        stats["cpu"] = psutil.cpu_percent(interval=0.1)
+        ram = psutil.virtual_memory()
+        stats["ram"] = ram.percent
+        stats["ram_total"] = ram.total
+        disk = psutil.disk_usage('/')
+        stats["disk"] = disk.percent
+    else:
+        # Fallback برای سیستم‌های لینوکسی بدون psutil
+        try:
+            stats["cpu"] = round(os.getloadavg()[0] / os.cpu_count() * 100, 1)
+        except: pass
+    return stats
 def parse_size_to_bytes(value: float, unit: str) -> int:
     unit = unit.upper()
     if unit == "GB": return int(value * 1024 ** 3)
@@ -161,7 +167,17 @@ def generate_protocol_link(
     """تولید کانفیگ متناسب با نوع پروتکل"""
     fp = fingerprint if fingerprint in FINGERPRINTS else DEFAULT_FINGERPRINT
     
-    if protocol_type == "vless-ws":
+    if protocol_type == "shadowsocks":
+        import base64
+        # روش استاندارد شادوساکس AEAD
+        method = "chacha20-ietf-poly1305"
+        # در شادوساکس رمز عبور همان UUID کاربر است
+        credentials = f"{method}:{uuid}"
+        encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
+        # توجه: پورت شادوساکس مجزا از پورت وب است
+        return f"ss://{encoded_creds}@{host}:{SS_PORT}#{quote(remark + ' [SS-AEAD]')}"
+        
+    elif protocol_type == "vless-ws":
         params = {"encryption": "none", "security": "tls", "type": "ws", "host": host, "path": f"/ws/{uuid}", "sni": host, "fp": fp, "alpn": "http/1.1"}
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-WS]')}"
@@ -193,7 +209,8 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
         generate_protocol_link("vless-ws", uid, host, remark, fp, port),
         generate_protocol_link("vless-xhttp", uid, host, remark, fp, port),
         generate_protocol_link("trojan-ws", uid, host, remark, fp, port),
-        generate_protocol_link("trojan-xhttp", uid, host, remark, fp, port)
+        generate_protocol_link("trojan-xhttp", uid, host, remark, fp, port),
+        generate_protocol_link("shadowsocks", uid, host, remark, fp, SS_PORT)
     ]
 
 async def load_state():
