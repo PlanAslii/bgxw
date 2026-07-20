@@ -46,39 +46,39 @@ async def parse_vless_header(data: bytes):
     payload = data[pos:]
     return cmd, addr, port, payload
 
-async def parse_trojan_header(data: bytes, expected_uuid: str):
+async def parse_socks5_address(data: bytes):
     """
-    استخراج هدر استاندارد Trojan.
-    فرمت: Hex(SHA224(Password))(56) + \r\n + CMD(1) + ATYP(1) + DST.ADDR + DST.PORT(2) + \r\n + Payload
-    ما از UUID به عنوان پسورد تروجان استفاده کرده‌ایم.
+    استخراج آدرس SOCKS5 که در هدر دیتای Shadowsocks پس از رمزگشایی قرار دارد.
+    برمی‌گرداند: (نوع آدرس, آدرس مقصد, پورت مقصد, طول هدر آدرس)
     """
-    if len(data) < 60:
-        raise ValueError("Trojan header is too short")
+    if not data:
+        raise ValueError("Empty SOCKS5 address data")
         
-    # پیدا کردن اولین جداکننده \r\n
-    idx1 = data.find(b'\r\n')
-    if idx1 == -1 or idx1 != 56:
-        raise ValueError("Invalid Trojan password format or missing CRLF")
-        
-    received_hash = data[:56].decode('ascii')
-    expected_hash = hashlib.sha224(expected_uuid.encode('utf-8')).hexdigest()
-    
-    if received_hash != expected_hash:
-        raise ValueError("Trojan Authentication Failed: Password Hash Mismatch")
-
-    cmd = data[idx1+2] # 1: CONNECT (TCP), 3: UDP ASSOCIATE
-    atyp = data[idx1+3]
-    pos = idx1+4
+    atyp = data[0]
+    pos = 1
     
     if atyp == 1: # IPv4
+        if len(data) < 7: raise ValueError("Truncated IPv4 address")
         addr = f"{data[pos]}.{data[pos+1]}.{data[pos+2]}.{data[pos+3]}"
         pos += 4
-    elif atyp == 3: # Domain
+    elif atyp == 3: # Domain Name
+        if len(data) < 2: raise ValueError("Truncated domain address")
         domain_len = data[pos]
         pos += 1
+        if len(data) < pos + domain_len + 2: raise ValueError("Truncated domain name string")
         addr = data[pos : pos + domain_len].decode('utf-8')
         pos += domain_len
     elif atyp == 4: # IPv6
+        if len(data) < 19: raise ValueError("Truncated IPv6 address")
+        addr = str(ipaddress.IPv6Address(data[pos : pos + 16]))
+        pos += 16
+    else:
+        raise ValueError(f"Invalid SOCKS5 ATYP: {atyp}")
+        
+    port = struct.unpack(">H", data[pos : pos+2])[0]
+    pos += 2
+    
+    return atyp, addr, port, pos
         addr = str(ipaddress.IPv6Address(data[pos : pos + 16]))
         pos += 16
     else:
