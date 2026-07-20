@@ -46,12 +46,25 @@ DATA_FILE = DATA_DIR / "x4g_state.json"
 SECRET_FILE = DATA_DIR / "x4g_secret.key"
 SAVE_LOCK = asyncio.Lock()
 
-# تنظیمات احراز هویت پنل
-DEFAULT_PASSWORD = "oxnet2024"
+# ========== AUTH ==========
 AUTH = {
-    "password_hash": hashlib.sha256(DEFAULT_PASSWORD.encode()).hexdigest(),
+    "password_hash": "",
     "password_changed": False
 }
+DEFAULT_PASSWORD = None
+
+def is_first_run() -> bool:
+    """بررسی اینکه آیا رمز عبور تنظیم شده است یا خیر"""
+    return not AUTH.get("password_hash") or AUTH["password_hash"] == ""
+
+async def set_first_run_password(password: str) -> bool:
+    """تنظیم رمز عبور برای اولین بار"""
+    if not password or len(password) < 6:
+        return False
+    AUTH["password_hash"] = hashlib.sha256(password.encode()).hexdigest()
+    AUTH["password_changed"] = True
+    await save_state()
+    return True
 
 def _load_or_create_secret() -> str:
     env_secret = os.environ.get("SECRET_KEY")
@@ -91,9 +104,9 @@ SUBS_LOCK = asyncio.Lock()
 SUPPORTED_TRANSPORTS = (
     "vless-ws", "vless-xhttp", "vless-grpc", "vless-quic",
     "trojan-ws", "trojan-xhttp", "trojan-grpc",
-    "shadowsocks", "shadowsocks-xhttp",
     "vmess-ws", "vmess-xhttp", "vmess-grpc",
-    "mtproto"  # پروتکل تلگرام
+    "shadowsocks", "shadowsocks-xhttp",
+    "mtproto"
 )
 FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "random", "none")
 DEFAULT_FINGERPRINT = "chrome"
@@ -102,7 +115,6 @@ SS_PORT = int(os.environ.get("SS_PORT", 8388))
 MTProto_PORT = int(os.environ.get("MTPROTO_PORT", 4433))
 
 def get_system_stats():
-    """دریافت وضعیت زنده منابع سرور برای نمایش در داشبورد"""
     stats = {"cpu": 0, "ram": 0, "ram_total": 0, "disk": 0}
     if PSUTIL_AVAILABLE:
         stats["cpu"] = psutil.cpu_percent(interval=0.1)
@@ -179,7 +191,6 @@ def generate_protocol_link(
     port: int = DEFAULT_PORT,
     extra_params: dict = None
 ) -> str:
-    """تولید کانفیگ متناسب با نوع پروتکل"""
     fp = fingerprint if fingerprint in FINGERPRINTS else DEFAULT_FINGERPRINT
     extra = extra_params or {}
     
@@ -191,7 +202,6 @@ def generate_protocol_link(
         return f"ss://{encoded_creds}@{host}:{SS_PORT}#{quote(remark + ' [SS-AEAD]')}"
     
     elif protocol_type == "shadowsocks-xhttp":
-        # Shadowsocks روی xHTTP (حالت جدید)
         import base64
         method = "chacha20-ietf-poly1305"
         credentials = f"{method}:{uuid}"
@@ -270,11 +280,8 @@ def generate_protocol_link(
         return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
     
     elif protocol_type == "mtproto":
-        # پروتکل تلگرام (MTProto)
-        # از uuid به عنوان رمز استفاده می‌کنیم
         import base64
         secret = base64.urlsafe_b64encode(uuid.encode()).decode().rstrip("=")
-        # فرمت: tg://proxy?server=host&port=port&secret=secret
         return f"tg://proxy?server={host}&port={MTProto_PORT}&secret={secret}#{quote(remark + ' [MTProto]')}"
         
     return ""
@@ -284,7 +291,6 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
     fp = link.get("fingerprint", DEFAULT_FINGERPRINT)
     port = link.get("port", DEFAULT_PORT)
     
-    # لیست کامل پروتکل‌ها
     protocols = [
         ("vless-ws", "VLESS-WS"),
         ("vless-xhttp", "VLESS-xHTTP"),
@@ -384,13 +390,11 @@ async def make_link(
     return uid, LINKS[uid]
 
 async def update_link(uid: str, updates: dict) -> dict | None:
-    """ویرایش لینک با اطلاعات جدید"""
     async with LINKS_LOCK:
         if uid not in LINKS:
             return None
         link = LINKS[uid]
         
-        # فیلدهای قابل ویرایش
         editable_fields = [
             "label", "limit_bytes", "expires_at", "note", 
             "fingerprint", "port", "ip_limit", "speed_limit_bytes", "active"
