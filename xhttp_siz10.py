@@ -173,13 +173,11 @@ def _downstream_gen(sess: dict):
         finally: pass
     return gen()
 
-# Route برای Downlink - پشتیبانی از تمام پروتکل‌ها
 @router.get("/xhttp-siz10/{mode}/{uuid}/{session_id}")
 @router.get("/xhttp-trojan/{mode}/{uuid}/{session_id}")
 @router.get("/xhttp-vmess/{mode}/{uuid}/{session_id}")
 @router.get("/xhttp-ss/{mode}/{uuid}/{session_id}")
 async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request):
-    # تشخیص پروتکل از مسیر
     path = request.url.path
     if "trojan" in path:
         protocol = "trojan"
@@ -202,13 +200,11 @@ async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request
     headers = _resp_headers()
     return StreamingResponse(_downstream_gen(sess), headers=headers, media_type=headers["content-type"])
 
-# Route برای Uplink - پشتیبانی از تمام پروتکل‌ها
 @router.post("/xhttp-siz10/packet-up/{uuid}/{session_id}/{seq}")
 @router.post("/xhttp-trojan/packet-up/{uuid}/{session_id}/{seq}")
 @router.post("/xhttp-vmess/packet-up/{uuid}/{session_id}/{seq}")
 @router.post("/xhttp-ss/packet-up/{uuid}/{session_id}/{seq}")
 async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Request):
-    # تشخیص پروتکل از مسیر
     path = request.url.path
     if "trojan" in path:
         protocol = "trojan"
@@ -271,11 +267,8 @@ async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Reques
 
     return {"ok": True}
 
-# Route برای gRPC
 @router.post("/grpc/{uuid}/{session_id}")
 async def grpc_tunnel(uuid: str, session_id: str, request: Request):
-    """پشتیبانی از gRPC برای VLESS, Trojan, VMESS"""
-    # تشخیص پروتکل از هدر
     protocol = request.headers.get("x-protocol", "vless")
     ip = request.client.host if request.client else "unknown"
     
@@ -290,7 +283,6 @@ async def grpc_tunnel(uuid: str, session_id: str, request: Request):
     if not body:
         return {"ok": True}
     
-    # برای gRPC، داده‌ها به صورت مستقیم به TCP ارسال می‌شوند
     try:
         if protocol == "vless":
             cmd, addr, port, payload = await parse_vless_header(body)
@@ -310,7 +302,6 @@ async def grpc_tunnel(uuid: str, session_id: str, request: Request):
             writer.write(payload)
             await writer.drain()
         
-        # ارسال پاسخ
         response = await reader.read(8192)
         writer.close()
         await writer.wait_closed()
