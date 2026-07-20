@@ -46,6 +46,13 @@ DATA_FILE = DATA_DIR / "x4g_state.json"
 SECRET_FILE = DATA_DIR / "x4g_secret.key"
 SAVE_LOCK = asyncio.Lock()
 
+# تنظیمات احراز هویت پنل
+DEFAULT_PASSWORD = "oxnet2024"
+AUTH = {
+    "password_hash": hashlib.sha256(DEFAULT_PASSWORD.encode()).hexdigest(),
+    "password_changed": False
+}
+
 def _load_or_create_secret() -> str:
     env_secret = os.environ.get("SECRET_KEY")
     if env_secret: return env_secret
@@ -80,12 +87,19 @@ LINKS_LOCK = asyncio.Lock()
 SUBS: dict = {}
 SUBS_LOCK = asyncio.Lock()
 
-# پروتکل‌های پشتیبانی شده برای جنریت شدن
-SUPPORTED_TRANSPORTS = ("vless-ws", "vless-xhttp", "trojan-ws", "trojan-xhttp", "shadowsocks")
-FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "random")
+# پروتکل‌های پشتیبانی شده
+SUPPORTED_TRANSPORTS = (
+    "vless-ws", "vless-xhttp", "vless-grpc", "vless-quic",
+    "trojan-ws", "trojan-xhttp", "trojan-grpc",
+    "shadowsocks", "shadowsocks-xhttp",
+    "vmess-ws", "vmess-xhttp", "vmess-grpc",
+    "mtproto"  # پروتکل تلگرام
+)
+FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "random", "none")
 DEFAULT_FINGERPRINT = "chrome"
 DEFAULT_PORT = 443
-SS_PORT = int(os.environ.get("SS_PORT", 8388)) # پورت اختصاصی شادوساکس
+SS_PORT = int(os.environ.get("SS_PORT", 8388))
+MTProto_PORT = int(os.environ.get("MTPROTO_PORT", 4433))
 
 def get_system_stats():
     """دریافت وضعیت زنده منابع سرور برای نمایش در داشبورد"""
@@ -98,11 +112,11 @@ def get_system_stats():
         disk = psutil.disk_usage('/')
         stats["disk"] = disk.percent
     else:
-        # Fallback برای سیستم‌های لینوکسی بدون psutil
         try:
             stats["cpu"] = round(os.getloadavg()[0] / os.cpu_count() * 100, 1)
         except: pass
     return stats
+
 def parse_size_to_bytes(value: float, unit: str) -> int:
     unit = unit.upper()
     if unit == "GB": return int(value * 1024 ** 3)
@@ -162,20 +176,27 @@ def generate_protocol_link(
     host: str,
     remark: str,
     fingerprint: str = DEFAULT_FINGERPRINT,
-    port: int = DEFAULT_PORT
+    port: int = DEFAULT_PORT,
+    extra_params: dict = None
 ) -> str:
     """تولید کانفیگ متناسب با نوع پروتکل"""
     fp = fingerprint if fingerprint in FINGERPRINTS else DEFAULT_FINGERPRINT
+    extra = extra_params or {}
     
     if protocol_type == "shadowsocks":
         import base64
-        # روش استاندارد شادوساکس AEAD
         method = "chacha20-ietf-poly1305"
-        # در شادوساکس رمز عبور همان UUID کاربر است
         credentials = f"{method}:{uuid}"
         encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
-        # توجه: پورت شادوساکس مجزا از پورت وب است
         return f"ss://{encoded_creds}@{host}:{SS_PORT}#{quote(remark + ' [SS-AEAD]')}"
+    
+    elif protocol_type == "shadowsocks-xhttp":
+        # Shadowsocks روی xHTTP (حالت جدید)
+        import base64
+        method = "chacha20-ietf-poly1305"
+        credentials = f"{method}:{uuid}"
+        encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
+        return f"ss-xhttp://{encoded_creds}@{host}:{port}?path=/xhttp-ss/packet-up/{uuid}#{quote(remark + ' [SS-xHTTP]')}"
         
     elif protocol_type == "vless-ws":
         params = {"encryption": "none", "security": "tls", "type": "ws", "host": host, "path": f"/ws/{uuid}", "sni": host, "fp": fp, "alpn": "http/1.1"}
@@ -186,9 +207,18 @@ def generate_protocol_link(
         params = {"encryption": "none", "security": "tls", "type": "xhttp", "mode": "packet-up", "host": host, "path": f"/xhttp-siz10/packet-up/{uuid}", "sni": host, "fp": fp, "alpn": "h2,http/1.1"}
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-xHTTP]')}"
+    
+    elif protocol_type == "vless-grpc":
+        params = {"encryption": "none", "security": "tls", "type": "grpc", "serviceName": f"/grpc/{uuid}", "host": host, "sni": host, "fp": fp, "alpn": "h2"}
+        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+        return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-gRPC]')}"
+    
+    elif protocol_type == "vless-quic":
+        params = {"encryption": "none", "security": "tls", "type": "quic", "host": host, "sni": host, "fp": fp}
+        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+        return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-QUIC]')}"
         
     elif protocol_type == "trojan-ws":
-        # برای تروجان از همان UUID به عنوان پسورد استفاده میکنیم
         params = {"security": "tls", "type": "ws", "host": host, "path": f"/trojan-ws/{uuid}", "sni": host, "fp": fp, "alpn": "http/1.1"}
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-WS]')}"
@@ -197,23 +227,92 @@ def generate_protocol_link(
         params = {"security": "tls", "type": "xhttp", "mode": "packet-up", "host": host, "path": f"/xhttp-trojan/packet-up/{uuid}", "sni": host, "fp": fp, "alpn": "h2,http/1.1"}
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-xHTTP]')}"
+    
+    elif protocol_type == "trojan-grpc":
+        params = {"security": "tls", "type": "grpc", "serviceName": f"/trojan-grpc/{uuid}", "host": host, "sni": host, "fp": fp, "alpn": "h2"}
+        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+        return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-gRPC]')}"
+        
+    elif protocol_type == "vmess-ws":
+        import base64
+        import json
+        vmess_obj = {
+            "v": "2", "ps": f"{remark} [VMESS-WS]",
+            "add": host, "port": port, "id": uuid,
+            "aid": "0", "net": "ws", "type": "none",
+            "host": host, "path": f"/vmess-ws/{uuid}",
+            "tls": "tls", "sni": host, "fp": fp
+        }
+        return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
+    
+    elif protocol_type == "vmess-xhttp":
+        import base64
+        import json
+        vmess_obj = {
+            "v": "2", "ps": f"{remark} [VMESS-xHTTP]",
+            "add": host, "port": port, "id": uuid,
+            "aid": "0", "net": "xhttp", "type": "packet-up",
+            "host": host, "path": f"/xhttp-vmess/packet-up/{uuid}",
+            "tls": "tls", "sni": host, "fp": fp
+        }
+        return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
+    
+    elif protocol_type == "vmess-grpc":
+        import base64
+        import json
+        vmess_obj = {
+            "v": "2", "ps": f"{remark} [VMESS-gRPC]",
+            "add": host, "port": port, "id": uuid,
+            "aid": "0", "net": "grpc", "type": "none",
+            "host": host, "path": f"/vmess-grpc/{uuid}",
+            "tls": "tls", "sni": host, "fp": fp
+        }
+        return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
+    
+    elif protocol_type == "mtproto":
+        # پروتکل تلگرام (MTProto)
+        # از uuid به عنوان رمز استفاده می‌کنیم
+        import base64
+        secret = base64.urlsafe_b64encode(uuid.encode()).decode().rstrip("=")
+        # فرمت: tg://proxy?server=host&port=port&secret=secret
+        return f"tg://proxy?server={host}&port={MTProto_PORT}&secret={secret}#{quote(remark + ' [MTProto]')}"
         
     return ""
 
 def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
-    remark = f"X4G-{link.get('label', '')}"
+    remark = f"OXNet-{link.get('label', '')}"
     fp = link.get("fingerprint", DEFAULT_FINGERPRINT)
     port = link.get("port", DEFAULT_PORT)
     
-    return [
-        generate_protocol_link("vless-ws", uid, host, remark, fp, port),
-        generate_protocol_link("vless-xhttp", uid, host, remark, fp, port),
-        generate_protocol_link("trojan-ws", uid, host, remark, fp, port),
-        generate_protocol_link("trojan-xhttp", uid, host, remark, fp, port),
-        generate_protocol_link("shadowsocks", uid, host, remark, fp, SS_PORT)
+    # لیست کامل پروتکل‌ها
+    protocols = [
+        ("vless-ws", "VLESS-WS"),
+        ("vless-xhttp", "VLESS-xHTTP"),
+        ("vless-grpc", "VLESS-gRPC"),
+        ("trojan-ws", "Trojan-WS"),
+        ("trojan-xhttp", "Trojan-xHTTP"),
+        ("trojan-grpc", "Trojan-gRPC"),
+        ("vmess-ws", "VMESS-WS"),
+        ("vmess-xhttp", "VMESS-xHTTP"),
+        ("vmess-grpc", "VMESS-gRPC"),
+        ("shadowsocks", "SS-AEAD"),
+        ("shadowsocks-xhttp", "SS-xHTTP"),
+        ("mtproto", "MTProto")
     ]
+    
+    links = []
+    for proto, label in protocols:
+        try:
+            link_str = generate_protocol_link(proto, uid, host, f"{remark} [{label}]", fp, port)
+            if link_str:
+                links.append(link_str)
+        except Exception as e:
+            logger.warning(f"Failed to generate {proto} link: {e}")
+    
+    return links
 
 async def load_state():
+    global AUTH
     try:
         if DATA_FILE.exists():
             async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -223,6 +322,8 @@ async def load_state():
             SUBS.update(data.get("subs", {}))
             if "password_hash" in data:
                 AUTH["password_hash"] = data["password_hash"]
+            if "password_changed" in data:
+                AUTH["password_changed"] = data["password_changed"]
             logger.info(f"State loaded: {len(LINKS)} links, {len(SUBS)} subs")
     except Exception as e:
         logger.warning(f"Could not load state: {e}")
@@ -234,6 +335,7 @@ async def save_state():
                 "links": dict(LINKS),
                 "subs": dict(SUBS),
                 "password_hash": AUTH["password_hash"],
+                "password_changed": AUTH["password_changed"],
                 "saved_at": datetime.now().isoformat(),
             }
             tmp = DATA_FILE.with_suffix(".tmp")
@@ -269,6 +371,7 @@ async def make_link(
             "port": port,
             "ip_limit": max(0, ip_limit),
             "speed_limit_bytes": max(0, speed_limit_bytes),
+            "edited_at": datetime.now().isoformat(),
         }
     if sub_id:
         async with SUBS_LOCK:
@@ -280,31 +383,35 @@ async def make_link(
     log_activity("link", f"مولتی کانفیگ «{LINKS[uid]['label']}» ساخته شد", "ok")
     return uid, LINKS[uid]
 
-async def create_multipack(label: str, limit_bytes: int, expires_days: int) -> tuple[str, str]:
-    """ساخت یک گروه ساب جدید و اختصاص یک کانفیگ مولتی پروتکل به آن"""
-    # 1. ساخت گروه
-    sub_id = generate_uuid()
-    uuid_key = secrets.token_urlsafe(16)
-    async with SUBS_LOCK:
-        SUBS[sub_id] = {
-            "name": f"گروه پک {label}",
-            "desc": "ساخته شده توسط مولتی پک",
-            "password_hash": None,
-            "uuid_key": uuid_key,
-            "created_at": datetime.now().isoformat(),
-            "link_ids": [],
-        }
-    
-    # 2. ساخت لینک و افزودن به گروه
-    expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat() if expires_days > 0 else None
-    await make_link(
-        label=label,
-        limit_bytes=limit_bytes,
-        expires_at=expires_at,
-        sub_id=sub_id
-    )
-    
-    return sub_id, uuid_key
+async def update_link(uid: str, updates: dict) -> dict | None:
+    """ویرایش لینک با اطلاعات جدید"""
+    async with LINKS_LOCK:
+        if uid not in LINKS:
+            return None
+        link = LINKS[uid]
+        
+        # فیلدهای قابل ویرایش
+        editable_fields = [
+            "label", "limit_bytes", "expires_at", "note", 
+            "fingerprint", "port", "ip_limit", "speed_limit_bytes", "active"
+        ]
+        
+        for field in editable_fields:
+            if field in updates and updates[field] is not None:
+                if field == "limit_bytes":
+                    link[field] = max(0, int(updates[field]))
+                elif field in ["ip_limit", "port", "speed_limit_bytes"]:
+                    link[field] = max(0, int(updates[field]))
+                elif field == "active":
+                    link[field] = bool(updates[field])
+                else:
+                    link[field] = updates[field]
+        
+        link["edited_at"] = datetime.now().isoformat()
+        
+    asyncio.create_task(save_state())
+    log_activity("link", f"کانفیگ «{link['label']}» ویرایش شد", "ok")
+    return link
 
 async def remove_link(uid: str) -> str | None:
     async with LINKS_LOCK:
@@ -333,3 +440,11 @@ async def remove_sub_group(sub_id: str) -> str | None:
     asyncio.create_task(save_state())
     log_activity("sub", f"گروه «{name}» حذف شد", "warn")
     return name
+
+def log_activity(category: str, message: str, level: str = "info"):
+    activity_logs.append({
+        "time": datetime.now().isoformat(),
+        "category": category,
+        "message": message,
+        "level": level
+    })
