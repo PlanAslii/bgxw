@@ -74,24 +74,6 @@ DASHBOARD_HTML = """
 </head>
 <body>
 
-    <!-- ========== MODAL LOGIN / SETUP ========== -->
-    <div id="login-modal" class="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4" style="display: flex;">
-        <div class="glass-panel p-8 rounded-3xl max-w-md w-full fade-in border border-primary/30 shadow-2xl shadow-primary/20">
-            <div class="text-center mb-8">
-                <div class="w-16 h-16 bg-primary/20 text-primary rounded-2xl flex items-center justify-center mx-auto mb-4 text-3xl font-bold">OX</div>
-                <h2 id="modal-title" class="text-2xl font-black">ورود به پنل OXNet</h2>
-                <p id="modal-desc" class="text-sm text-gray-400 mt-2">لطفاً رمز عبور خود را وارد کنید</p>
-                <div id="default-pass-hint" class="mt-3 text-xs text-yellow-400 bg-yellow-400/10 p-3 rounded-xl hidden border border-yellow-400/20">
-                    🔑 رمز پیش‌فرض: <span id="default-pass-display" class="font-mono font-bold text-yellow-300"></span>
-                    <br><span class="text-gray-500 text-[10px]">(پس از ورود می‌توانید آن را تغییر دهید)</span>
-                </div>
-            </div>
-            <form id="login-form" class="space-y-4">
-                <!-- فرم توسط JavaScript پر می‌شود -->
-            </form>
-        </div>
-    </div>
-
     <!-- ========== SIDEBAR ========== -->
     <aside class="w-64 glass-panel border-l border-neutral-800 hidden md:flex flex-col h-screen sticky top-0 z-40">
         <div class="p-6 border-b border-neutral-800 flex items-center justify-center gap-3">
@@ -247,26 +229,6 @@ DASHBOARD_HTML = """
                 <h2 class="text-2xl font-black">⚙️ تنظیمات پنل</h2>
                 
                 <div class="glass-panel p-6 rounded-2xl max-w-lg">
-                    <h3 class="text-lg font-bold mb-4">🔐 تغییر رمز عبور</h3>
-                    <form id="change-password-form" onsubmit="changePassword(event)" class="space-y-4">
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-400 mb-1">رمز فعلی</label>
-                            <input type="password" id="old-password" required placeholder="رمز فعلی را وارد کنید">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-400 mb-1">رمز جدید</label>
-                            <input type="password" id="new-password" required minlength="6" placeholder="حداقل 6 کاراکتر">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-400 mb-1">تکرار رمز جدید</label>
-                            <input type="password" id="confirm-password" required placeholder="دوباره وارد کنید">
-                        </div>
-                        <button type="submit" class="btn-success w-full py-3 rounded-xl">تغییر رمز عبور</button>
-                        <div id="password-result" class="text-sm text-center hidden"></div>
-                    </form>
-                </div>
-                
-                <div class="glass-panel p-6 rounded-2xl max-w-lg">
                     <h3 class="text-lg font-bold mb-4">📊 اطلاعات سیستم</h3>
                     <div class="space-y-3 text-sm">
                         <div class="flex justify-between border-b border-neutral-800 pb-2">
@@ -368,355 +330,28 @@ DASHBOARD_HTML = """
         // ============================================================
         // STATE
         // ============================================================
-        let authToken = localStorage.getItem('oxnet_token') || '';
-        let isAuthenticated = false;
-        let isFirstRun = false;
+        let isAuthenticated = true; // همیشه احراز هویت شده
 
         // ============================================================
-        // AUTHENTICATION
+        // API HELPER
         // ============================================================
-        
-        function getAuthHeaders() {
-            const basicToken = localStorage.getItem('oxnet_basic_token');
-            if (basicToken) {
-                return { 'Authorization': 'Basic ' + basicToken };
-            }
-            const token = localStorage.getItem('oxnet_token');
-            if (token) {
-                return { 'Authorization': 'Bearer ' + token };
-            }
-            return {};
-        }
-
         async function fetchAPI(endpoint, method = 'GET', body = null) {
-            const headers = {
-                'Content-Type': 'application/json',
-                ...getAuthHeaders()
+            const opts = { 
+                method, 
+                headers: { 'Content-Type': 'application/json' }
             };
-            const opts = { method, headers };
             if (body) opts.body = JSON.stringify(body);
             const res = await fetch(`/api/panel${endpoint}`, opts);
             if (!res.ok) {
-                if (res.status === 401) {
-                    localStorage.removeItem('oxnet_token');
-                    localStorage.removeItem('oxnet_basic_token');
-                    authToken = '';
-                    isAuthenticated = false;
-                    document.getElementById('login-modal').style.display = 'flex';
-                    throw new Error('Unauthorized');
-                }
                 throw new Error(`HTTP ${res.status}`);
             }
             return res.json();
         }
 
         // ============================================================
-        // CHECK AUTH STATUS
-        // ============================================================
-        async function checkAuthStatus() {
-            try {
-                const res = await fetch('/api/auth/status');
-                const data = await res.json();
-                isFirstRun = data.first_run;
-                
-                console.log('🔑 First run:', isFirstRun);
-                
-                if (isFirstRun) {
-                    showSetupForm();
-                    return false;
-                }
-                return await checkToken();
-            } catch(e) {
-                console.error('Status check failed:', e);
-                showLoginForm();
-                return false;
-            }
-        }
-
-        // ============================================================
-        // SHOW SETUP FORM
-        // ============================================================
-        function showSetupForm() {
-            const modal = document.getElementById('login-modal');
-            document.getElementById('modal-title').textContent = '🔐 تنظیم رمز عبور';
-            document.getElementById('modal-desc').textContent = 'این اولین بار است که پنل را اجرا می‌کنید. لطفاً یک رمز عبور تنظیم کنید.';
-            document.getElementById('default-pass-hint').classList.add('hidden');
-            
-            const form = document.getElementById('login-form');
-            form.innerHTML = `
-                <div>
-                    <label class="block text-xs font-semibold text-gray-400 mb-1">🔐 رمز عبور جدید</label>
-                    <input type="password" id="setup-password" required placeholder="حداقل 6 کاراکتر" class="text-center text-lg tracking-widest">
-                </div>
-                <div>
-                    <label class="block text-xs font-semibold text-gray-400 mb-1">🔐 تکرار رمز عبور</label>
-                    <input type="password" id="setup-confirm" required placeholder="دوباره وارد کنید" class="text-center text-lg tracking-widest">
-                </div>
-                <button type="button" onclick="setupPassword()" class="btn-primary w-full py-3.5 rounded-xl text-lg font-bold flex items-center justify-center gap-2">
-                    ✅ تنظیم رمز عبور
-                </button>
-                <div id="setup-error" class="text-red-500 text-sm text-center hidden bg-red-500/10 p-3 rounded-xl"></div>
-            `;
-            
-            document.getElementById('setup-password').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') setupPassword();
-            });
-            document.getElementById('setup-confirm').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') setupPassword();
-            });
-            
-            modal.style.display = 'flex';
-        }
-
-        // ============================================================
-        // SETUP PASSWORD
-        // ============================================================
-        async function setupPassword() {
-            const password = document.getElementById('setup-password').value;
-            const confirm = document.getElementById('setup-confirm').value;
-            const errorEl = document.getElementById('setup-error');
-            const btn = document.querySelector('#login-form button');
-            const origText = btn.innerHTML;
-            
-            errorEl.classList.add('hidden');
-            
-            if (password.length < 6) {
-                errorEl.textContent = '❌ رمز عبور باید حداقل 6 کاراکتر باشد';
-                errorEl.classList.remove('hidden');
-                return;
-            }
-            if (password !== confirm) {
-                errorEl.textContent = '❌ رمز عبور و تکرار آن مطابقت ندارند';
-                errorEl.classList.remove('hidden');
-                return;
-            }
-            
-            btn.innerHTML = '⏳ در حال تنظیم...';
-            btn.disabled = true;
-            
-            try {
-                console.log('📤 Sending setup request...');
-                const res = await fetch('/api/auth/setup', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password, confirm })
-                });
-                const data = await res.json();
-                console.log('📥 Setup response:', data);
-                
-                if (data.ok) {
-                    authToken = data.token;
-                    localStorage.setItem('oxnet_token', authToken);
-                    if (data.basic_token) {
-                        localStorage.setItem('oxnet_basic_token', data.basic_token);
-                    }
-                    isAuthenticated = true;
-                    isFirstRun = false;
-                    document.getElementById('login-modal').style.display = 'none';
-                    
-                    loadStats();
-                    loadLinks();
-                    
-                    const term = document.getElementById('live-logs');
-                    const time = new Date().toLocaleTimeString('fa-IR');
-                    term.innerHTML += `<div class="text-green-400">[${time}] ✅ رمز عبور با موفقیت تنظیم شد</div>`;
-                    term.scrollTop = term.scrollHeight;
-                    
-                    console.log('✅ Setup completed successfully!');
-                } else {
-                    errorEl.textContent = '❌ ' + (data.error || 'خطا در تنظیم رمز عبور');
-                    errorEl.classList.remove('hidden');
-                }
-            } catch(e) {
-                errorEl.textContent = '❌ خطا در ارتباط با سرور';
-                errorEl.classList.remove('hidden');
-                console.error('Setup error:', e);
-            }
-            
-            btn.innerHTML = origText;
-            btn.disabled = false;
-        }
-
-        // ============================================================
-        // CHECK TOKEN
-        // ============================================================
-        async function checkToken() {
-            const token = localStorage.getItem('oxnet_token');
-            const basicToken = localStorage.getItem('oxnet_basic_token');
-            
-            if (token || basicToken) {
-                try {
-                    const headers = getAuthHeaders();
-                    const res = await fetch('/api/panel/stats', { headers });
-                    if (res.ok) {
-                        isAuthenticated = true;
-                        document.getElementById('login-modal').style.display = 'none';
-                        loadStats();
-                        loadLinks();
-                        return true;
-                    } else if (res.status === 401) {
-                        localStorage.removeItem('oxnet_token');
-                        localStorage.removeItem('oxnet_basic_token');
-                    }
-                } catch(e) {
-                    console.error('Token check failed:', e);
-                }
-            }
-            
-            showLoginForm();
-            return false;
-        }
-
-        // ============================================================
-        // SHOW LOGIN FORM
-        // ============================================================
-        function showLoginForm() {
-            document.getElementById('modal-title').textContent = 'ورود به پنل OXNet';
-            document.getElementById('modal-desc').textContent = 'لطفاً رمز عبور خود را وارد کنید';
-            document.getElementById('default-pass-hint').classList.add('hidden');
-            
-            const form = document.getElementById('login-form');
-            form.innerHTML = `
-                <div>
-                    <label class="block text-xs font-semibold text-gray-400 mb-1">🔐 رمز عبور</label>
-                    <input type="password" id="login-password" required placeholder="رمز عبور را وارد کنید..." class="text-center text-lg tracking-widest">
-                </div>
-                <button type="button" id="login-btn" onclick="login()" class="btn-primary w-full py-3.5 rounded-xl text-lg font-bold flex items-center justify-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"></path></svg>
-                    ورود به پنل مدیریت
-                </button>
-                <div id="login-error" class="text-red-500 text-sm text-center hidden bg-red-500/10 p-3 rounded-xl"></div>
-            `;
-            
-            document.getElementById('login-password').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') login();
-            });
-            
-            document.getElementById('login-modal').style.display = 'flex';
-        }
-
-        // ============================================================
-        // LOGIN
-        // ============================================================
-        async function login() {
-            const password = document.getElementById('login-password').value;
-            const errorEl = document.getElementById('login-error');
-            const btn = document.getElementById('login-btn');
-            const origText = btn.innerHTML;
-            
-            btn.innerHTML = '⏳ در حال بررسی...';
-            btn.disabled = true;
-            errorEl.classList.add('hidden');
-            
-            try {
-                const res = await fetch('/api/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
-                });
-                const data = await res.json();
-                
-                if (data.ok) {
-                    authToken = data.token;
-                    localStorage.setItem('oxnet_token', authToken);
-                    if (data.basic_token) {
-                        localStorage.setItem('oxnet_basic_token', data.basic_token);
-                    }
-                    isAuthenticated = true;
-                    document.getElementById('login-modal').style.display = 'none';
-                    loadStats();
-                    loadLinks();
-                    
-                    const term = document.getElementById('live-logs');
-                    const time = new Date().toLocaleTimeString('fa-IR');
-                    term.innerHTML += `<div class="text-green-400">[${time}] ✅ ورود موفق به پنل مدیریت</div>`;
-                    term.scrollTop = term.scrollHeight;
-                } else {
-                    if (data.setup_required) {
-                        showSetupForm();
-                        return;
-                    }
-                    errorEl.textContent = '❌ ' + (data.error || 'رمز عبور اشتباه است');
-                    errorEl.classList.remove('hidden');
-                }
-            } catch(e) {
-                errorEl.textContent = '❌ خطا در ارتباط با سرور';
-                errorEl.classList.remove('hidden');
-                console.error('Login error:', e);
-            }
-            
-            btn.innerHTML = origText;
-            btn.disabled = false;
-        }
-
-        // ============================================================
-        // CHANGE PASSWORD
-        // ============================================================
-        async function changePassword(event) {
-            event.preventDefault();
-            if (!isAuthenticated) {
-                document.getElementById('login-modal').style.display = 'flex';
-                return;
-            }
-            
-            const oldPass = document.getElementById('old-password').value;
-            const newPass = document.getElementById('new-password').value;
-            const confirmPass = document.getElementById('confirm-password').value;
-            const resultEl = document.getElementById('password-result');
-            
-            if (newPass !== confirmPass) {
-                resultEl.textContent = '❌ رمزهای جدید مطابقت ندارند';
-                resultEl.className = 'text-sm text-center text-red-500';
-                resultEl.classList.remove('hidden');
-                return;
-            }
-            if (newPass.length < 6) {
-                resultEl.textContent = '❌ رمز جدید باید حداقل 6 کاراکتر باشد';
-                resultEl.className = 'text-sm text-center text-red-500';
-                resultEl.classList.remove('hidden');
-                return;
-            }
-            
-            try {
-                const res = await fetch('/api/auth/change-password', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...getAuthHeaders()
-                    },
-                    body: JSON.stringify({ old_password: oldPass, new_password: newPass })
-                });
-                const data = await res.json();
-                
-                if (data.ok) {
-                    resultEl.textContent = '✅ ' + data.message;
-                    resultEl.className = 'text-sm text-center text-green-500';
-                    document.getElementById('change-password-form').reset();
-                    localStorage.removeItem('oxnet_token');
-                    localStorage.removeItem('oxnet_basic_token');
-                    isAuthenticated = false;
-                    document.getElementById('login-modal').style.display = 'flex';
-                } else {
-                    resultEl.textContent = '❌ ' + (data.error || 'خطا');
-                    resultEl.className = 'text-sm text-center text-red-500';
-                }
-                resultEl.classList.remove('hidden');
-            } catch(e) {
-                resultEl.textContent = '❌ خطا در ارتباط با سرور';
-                resultEl.className = 'text-sm text-center text-red-500';
-                resultEl.classList.remove('hidden');
-            }
-        }
-
-        // ============================================================
         // UI NAVIGATION
         // ============================================================
         function showTab(tab) {
-            if (!isAuthenticated) {
-                document.getElementById('login-modal').style.display = 'flex';
-                return;
-            }
-            
             document.querySelectorAll('#tabs-container > div').forEach(el => el.classList.add('hidden'));
             document.getElementById(`tab-${tab}`).classList.remove('hidden');
             
@@ -809,7 +444,6 @@ DASHBOARD_HTML = """
 
         async function loadStats() {
             if (document.getElementById('tab-dashboard').classList.contains('hidden')) return;
-            if (!isAuthenticated) return;
             
             try {
                 const data = await fetchAPI('/stats');
@@ -860,7 +494,6 @@ DASHBOARD_HTML = """
         // LINK MANAGEMENT
         // ============================================================
         async function loadLinks() {
-            if (!isAuthenticated) return;
             try {
                 const data = await fetchAPI('/links');
                 const tbody = document.getElementById('links-tbody');
@@ -919,10 +552,6 @@ DASHBOARD_HTML = """
         // ============================================================
         async function createMultipack(e) {
             e.preventDefault();
-            if (!isAuthenticated) {
-                document.getElementById('login-modal').style.display = 'flex';
-                return;
-            }
             
             const btn = document.getElementById('mp-btn');
             const originalText = btn.innerHTML;
@@ -971,7 +600,6 @@ DASHBOARD_HTML = """
         // ============================================================
         async function deleteLink(uid) {
             if (!confirm('⚠️ آیا از حذف این کاربر مطمئن هستید؟')) return;
-            if (!isAuthenticated) return;
             try {
                 await fetchAPI(`/links/${uid}`, 'DELETE');
                 loadLinks();
@@ -988,7 +616,6 @@ DASHBOARD_HTML = """
         let editingUid = null;
         
         async function openEditModal(uid) {
-            if (!isAuthenticated) return;
             try {
                 const data = await fetchAPI(`/links/${uid}`);
                 const link = data.link;
@@ -1027,7 +654,7 @@ DASHBOARD_HTML = """
 
         async function saveEdit(event) {
             event.preventDefault();
-            if (!editingUid || !isAuthenticated) return;
+            if (!editingUid) return;
             
             const btn = event.target.querySelector('button[type="submit"]');
             const origText = btn.innerHTML;
@@ -1117,18 +744,15 @@ DASHBOARD_HTML = """
         // INIT
         // ============================================================
         document.addEventListener('DOMContentLoaded', () => {
-            checkAuthStatus();
+            loadStats();
+            loadLinks();
             
-            document.getElementById('login-modal').addEventListener('click', function(e) {
-                if (e.target === this && isAuthenticated) {
-                    this.style.display = 'none';
-                }
-            });
+            // نمایش پیش‌فرض داشبورد
+            showTab('dashboard');
         });
 
         console.log('🚀 OXNet Panel v4.0 Loaded');
-        console.log('🔑 First run:', isFirstRun);
-        console.log('📁 Check console for debug info');
+        console.log('🔓 Panel is open (no password required)');
     </script>
 </body>
 </html>
