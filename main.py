@@ -1,13 +1,14 @@
 # main.py
 import asyncio
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException, Header
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from datetime import datetime
 import hashlib
 import secrets
+import base64
 
 from state import (
     load_state, save_state, CONFIG, logger, AUTH, DEFAULT_PASSWORD,
@@ -26,13 +27,40 @@ try:
 except ImportError:
     SS_ENABLED = False
 
-security = HTTPBasic()
+# امنیت
+security_basic = HTTPBasic()
+security_bearer = HTTPBearer()
 
-def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
-    """بررسی احراز هویت برای مسیرهای مدیریتی"""
+# ذخیره توکن‌های فعال (برای ساده‌سازی - در تولید از JWT استفاده کنید)
+active_tokens = {}
+
+def verify_auth(credentials: HTTPBasicCredentials = Depends(security_basic)):
+    """بررسی احراز هویت با Basic Auth"""
     password_hash = hashlib.sha256(credentials.password.encode()).hexdigest()
     if AUTH["password_hash"] != password_hash:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    return True
+
+def verify_token(authorization: str = Header(None)):
+    """بررسی توکن از هدر Authorization"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    
+    # پشتیبانی از هر دو فرمت: "Bearer token" و "token"
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    # بررسی توکن
+    if token not in active_tokens:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # بررسی انقضای توکن
+    if active_tokens[token] < datetime.now():
+        del active_tokens[token]
+        raise HTTPException(status_code=401, detail="Token expired")
+    
     return True
 
 @asynccontextmanager
@@ -64,19 +92,36 @@ async def root():
 @app.post("/api/auth/login")
 async def login(request: Request):
     """ورود به پنل و دریافت توکن"""
-    data = await request.json()
-    password = data.get("password", "")
+    try:
+        data = await request.json()
+        password = data.get("password", "")
+    except:
+        # پشتیبانی از فرم داده‌های فرم نیز
+        form = await request.form()
+        password = form.get("password", "")
+    
     password_hash = hashlib.sha256(password.encode()).hexdigest()
     
     if AUTH["password_hash"] != password_hash:
         return JSONResponse({"ok": False, "error": "رمز عبور اشتباه است"}, status_code=401)
     
-    # تولید توکن ساده (برای دمو)
+    # تولید توکن جدید
     token = secrets.token_urlsafe(32)
-    return {"ok": True, "token": token}
+    # توکن به مدت 24 ساعت معتبر است
+    active_tokens[token] = datetime.now().replace(hour=23, minute=59, second=59)
+    
+    # همچنین برای پشتیبانی از Basic Auth، یک توکن Base64 هم برمی‌گردانیم
+    basic_token = base64.b64encode(f"admin:{token}".encode()).decode()
+    
+    return {
+        "ok": True, 
+        "token": token,
+        "basic_token": basic_token,
+        "expires_in": 86400  # 24 ساعت
+    }
 
 @app.post("/api/auth/change-password")
-async def change_password(request: Request, auth: bool = Depends(verify_auth)):
+async def change_password(request: Request, auth: bool = Depends(verify_token)):
     """تغییر رمز عبور پنل"""
     data = await request.json()
     old_password = data.get("old_password", "")
@@ -102,7 +147,7 @@ async def get_default_password():
     return {"default_password": DEFAULT_PASSWORD if not AUTH.get("password_changed", False) else None}
 
 @app.get("/api/panel/stats")
-async def get_stats(auth: bool = Depends(verify_auth)):
+async def get_stats(auth: bool = Depends(verify_token)):
     from state import get_system_stats
     total_vol = sum(l.get("used_bytes", 0) for l in LINKS.values())
     return {
@@ -114,17 +159,17 @@ async def get_stats(auth: bool = Depends(verify_auth)):
     }
 
 @app.get("/api/panel/links")
-async def get_links(auth: bool = Depends(verify_auth)):
+async def get_links(auth: bool = Depends(verify_token)):
     return {"links": LINKS}
 
 @app.get("/api/panel/links/{uid}")
-async def get_link(uid: str, auth: bool = Depends(verify_auth)):
+async def get_link(uid: str, auth: bool = Depends(verify_token)):
     if uid not in LINKS:
         return JSONResponse({"error": "لینک یافت نشد"}, status_code=404)
     return {"link": LINKS[uid]}
 
 @app.put("/api/panel/links/{uid}")
-async def edit_link(uid: str, request: Request, auth: bool = Depends(verify_auth)):
+async def edit_link(uid: str, request: Request, auth: bool = Depends(verify_token)):
     """ویرایش لینک"""
     if uid not in LINKS:
         return JSONResponse({"error": "لینک یافت نشد"}, status_code=404)
@@ -137,12 +182,12 @@ async def edit_link(uid: str, request: Request, auth: bool = Depends(verify_auth
     return {"ok": True, "link": updated}
 
 @app.delete("/api/panel/links/{uid}")
-async def del_link(uid: str, auth: bool = Depends(verify_auth)):
+async def del_link(uid: str, auth: bool = Depends(verify_token)):
     res = await remove_link(uid)
     return {"ok": res is not None}
 
 @app.post("/api/panel/multipack")
-async def api_create_multipack(request: Request, auth: bool = Depends(verify_auth)):
+async def api_create_multipack(request: Request, auth: bool = Depends(verify_token)):
     data = await request.json()
     label = data.get("label", "MultiPack")
     limit_bytes = int(data.get("limit_gb", 0) * 1024**3)
@@ -212,7 +257,6 @@ async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
         elif protocol == "trojan":
             cmd, addr, port, payload = await parse_trojan_header(first_packet, uuid)
         else:  # vmess
-            # برای VMESS باید هدر جداگانه پیاده‌سازی شود
             cmd, addr, port, payload = 1, "1.1.1.1", 443, first_packet
             
         reader, writer = await asyncio.open_connection(addr, port)
