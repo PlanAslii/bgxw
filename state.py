@@ -50,30 +50,6 @@ SAVE_LOCK = asyncio.Lock()
 logger.info(f"Data directory: {DATA_DIR}")
 logger.info(f"Data file: {DATA_FILE}")
 
-# ========== AUTH ==========
-AUTH = {
-    "password_hash": "",
-    "password_changed": False
-}
-
-def is_first_run() -> bool:
-    """بررسی اینکه آیا رمز عبور تنظیم شده است یا خیر"""
-    return not AUTH.get("password_hash") or AUTH["password_hash"] == ""
-
-async def set_first_run_password(password: str) -> bool:
-    """تنظیم رمز عبور برای اولین بار"""
-    if not password or len(password) < 6:
-        return False
-    
-    AUTH["password_hash"] = hashlib.sha256(password.encode()).hexdigest()
-    AUTH["password_changed"] = True
-    
-    # ذخیره فوری
-    await save_state()
-    
-    logger.info("✅ Password set successfully!")
-    return True
-
 def _load_or_create_secret() -> str:
     env_secret = os.environ.get("SECRET_KEY")
     if env_secret: return env_secret
@@ -327,7 +303,7 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
 
 async def load_state():
     """بارگذاری وضعیت از فایل"""
-    global AUTH, LINKS, SUBS
+    global LINKS, SUBS
     try:
         if DATA_FILE.exists():
             async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -337,20 +313,12 @@ async def load_state():
             LINKS.update(data.get("links", {}))
             SUBS.update(data.get("subs", {}))
             
-            if "password_hash" in data:
-                AUTH["password_hash"] = data["password_hash"]
-            if "password_changed" in data:
-                AUTH["password_changed"] = data["password_changed"]
-            
             logger.info(f"✅ State loaded: {len(LINKS)} links, {len(SUBS)} subs")
-            logger.info(f"🔑 Password set: {bool(AUTH['password_hash'])}")
         else:
             logger.warning("⚠️ No state file found. Starting fresh.")
-            # ایجاد فایل جدید با وضعیت خالی
             await save_state()
     except Exception as e:
         logger.error(f"❌ Could not load state: {e}")
-        # ایجاد فایل جدید در صورت خطا
         await save_state()
 
 async def save_state():
@@ -360,15 +328,11 @@ async def save_state():
             data = {
                 "links": dict(LINKS),
                 "subs": dict(SUBS),
-                "password_hash": AUTH["password_hash"],
-                "password_changed": AUTH["password_changed"],
                 "saved_at": datetime.now().isoformat(),
             }
             
-            # اطمینان از وجود دایرکتوری
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             
-            # نوشتن در فایل موقت و سپس جایگزینی
             tmp = DATA_FILE.with_suffix(".tmp")
             async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, ensure_ascii=False, indent=2))
