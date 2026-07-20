@@ -36,6 +36,8 @@ DASHBOARD_HTML = """
         .btn-danger:hover { filter: brightness(1.2); }
         .btn-success { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #fff; }
         .btn-success:hover { filter: brightness(1.2); }
+        .btn-warning { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #fff; }
+        .btn-warning:hover { filter: brightness(1.2); }
         input, select { background: #0a0a0a; border: 1px solid #333; color: white; padding: 0.6rem 1rem; border-radius: 0.5rem; width: 100%; outline: none; transition: border 0.2s; }
         input:focus, select:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
         input::placeholder { color: #555; }
@@ -58,7 +60,6 @@ DASHBOARD_HTML = """
         .protocol-mtproto { background: #ef4444; color: #fff; }
         .modal-overlay { background: rgba(0,0,0,0.85); backdrop-filter: blur(8px); }
         .modal-content { max-height: 90vh; overflow-y: auto; max-width: 600px; width: 100%; }
-        .login-form { max-width: 400px; margin: 0 auto; }
         table { border-collapse: collapse; width: 100%; }
         th { text-align: right; padding: 1rem 1.25rem; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; border-bottom: 1px solid #222; }
         td { padding: 1rem 1.25rem; border-bottom: 1px solid #1a1a1a; vertical-align: middle; }
@@ -68,6 +69,7 @@ DASHBOARD_HTML = """
             .stat-card .text-3xl { font-size: 1.5rem; }
             td, th { padding: 0.5rem 0.75rem; font-size: 12px; }
         }
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
@@ -417,6 +419,8 @@ DASHBOARD_HTML = """
                 const data = await res.json();
                 isFirstRun = data.first_run;
                 
+                console.log('🔑 First run:', isFirstRun);
+                
                 if (isFirstRun) {
                     showSetupForm();
                     return false;
@@ -424,6 +428,7 @@ DASHBOARD_HTML = """
                 return await checkToken();
             } catch(e) {
                 console.error('Status check failed:', e);
+                showLoginForm();
                 return false;
             }
         }
@@ -453,7 +458,6 @@ DASHBOARD_HTML = """
                 <div id="setup-error" class="text-red-500 text-sm text-center hidden bg-red-500/10 p-3 rounded-xl"></div>
             `;
             
-            // Enter key support
             document.getElementById('setup-password').addEventListener('keypress', function(e) {
                 if (e.key === 'Enter') setupPassword();
             });
@@ -491,12 +495,14 @@ DASHBOARD_HTML = """
             btn.disabled = true;
             
             try {
+                console.log('📤 Sending setup request...');
                 const res = await fetch('/api/auth/setup', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password, confirm })
                 });
                 const data = await res.json();
+                console.log('📥 Setup response:', data);
                 
                 if (data.ok) {
                     authToken = data.token;
@@ -507,6 +513,7 @@ DASHBOARD_HTML = """
                     isAuthenticated = true;
                     isFirstRun = false;
                     document.getElementById('login-modal').style.display = 'none';
+                    
                     loadStats();
                     loadLinks();
                     
@@ -514,6 +521,8 @@ DASHBOARD_HTML = """
                     const time = new Date().toLocaleTimeString('fa-IR');
                     term.innerHTML += `<div class="text-green-400">[${time}] ✅ رمز عبور با موفقیت تنظیم شد</div>`;
                     term.scrollTop = term.scrollHeight;
+                    
+                    console.log('✅ Setup completed successfully!');
                 } else {
                     errorEl.textContent = '❌ ' + (data.error || 'خطا در تنظیم رمز عبور');
                     errorEl.classList.remove('hidden');
@@ -1119,6 +1128,7 @@ DASHBOARD_HTML = """
 
         console.log('🚀 OXNet Panel v4.0 Loaded');
         console.log('🔑 First run:', isFirstRun);
+        console.log('📁 Check console for debug info');
     </script>
 </body>
 </html>
