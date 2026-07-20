@@ -22,10 +22,11 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("X4G-Core")
+logger = logging.getLogger("OXNet-Core")
 
 IRAN_TZ = ZoneInfo("Asia/Tehran")
 
+# ========== DIRECTORY SETUP ==========
 env_data = os.environ.get("DATA_DIR")
 if env_data:
     DATA_DIR = Path(env_data)
@@ -39,19 +40,21 @@ else:
         DATA_DIR = _local_data
     except (OSError, PermissionError):
         logger.warning("Directory './data' is not writable. Falling back to temporary directory.")
-        DATA_DIR = Path(tempfile.gettempdir()) / "x4g_data"
+        DATA_DIR = Path(tempfile.gettempdir()) / "oxnet_data"
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DATA_FILE = DATA_DIR / "x4g_state.json"
-SECRET_FILE = DATA_DIR / "x4g_secret.key"
+DATA_FILE = DATA_DIR / "oxnet_state.json"
+SECRET_FILE = DATA_DIR / "oxnet_secret.key"
 SAVE_LOCK = asyncio.Lock()
+
+logger.info(f"Data directory: {DATA_DIR}")
+logger.info(f"Data file: {DATA_FILE}")
 
 # ========== AUTH ==========
 AUTH = {
     "password_hash": "",
     "password_changed": False
 }
-DEFAULT_PASSWORD = None
 
 def is_first_run() -> bool:
     """بررسی اینکه آیا رمز عبور تنظیم شده است یا خیر"""
@@ -61,9 +64,14 @@ async def set_first_run_password(password: str) -> bool:
     """تنظیم رمز عبور برای اولین بار"""
     if not password or len(password) < 6:
         return False
+    
     AUTH["password_hash"] = hashlib.sha256(password.encode()).hexdigest()
     AUTH["password_changed"] = True
+    
+    # ذخیره فوری
     await save_state()
+    
+    logger.info("✅ Password set successfully!")
     return True
 
 def _load_or_create_secret() -> str:
@@ -318,23 +326,35 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
     return links
 
 async def load_state():
-    global AUTH
+    """بارگذاری وضعیت از فایل"""
+    global AUTH, LINKS, SUBS
     try:
         if DATA_FILE.exists():
             async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = await f.read()
             data = json.loads(raw)
+            
             LINKS.update(data.get("links", {}))
             SUBS.update(data.get("subs", {}))
+            
             if "password_hash" in data:
                 AUTH["password_hash"] = data["password_hash"]
             if "password_changed" in data:
                 AUTH["password_changed"] = data["password_changed"]
-            logger.info(f"State loaded: {len(LINKS)} links, {len(SUBS)} subs")
+            
+            logger.info(f"✅ State loaded: {len(LINKS)} links, {len(SUBS)} subs")
+            logger.info(f"🔑 Password set: {bool(AUTH['password_hash'])}")
+        else:
+            logger.warning("⚠️ No state file found. Starting fresh.")
+            # ایجاد فایل جدید با وضعیت خالی
+            await save_state()
     except Exception as e:
-        logger.warning(f"Could not load state: {e}")
+        logger.error(f"❌ Could not load state: {e}")
+        # ایجاد فایل جدید در صورت خطا
+        await save_state()
 
 async def save_state():
+    """ذخیره وضعیت در فایل"""
     async with SAVE_LOCK:
         try:
             data = {
@@ -344,12 +364,21 @@ async def save_state():
                 "password_changed": AUTH["password_changed"],
                 "saved_at": datetime.now().isoformat(),
             }
+            
+            # اطمینان از وجود دایرکتوری
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            
+            # نوشتن در فایل موقت و سپس جایگزینی
             tmp = DATA_FILE.with_suffix(".tmp")
             async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, ensure_ascii=False, indent=2))
             tmp.replace(DATA_FILE)
+            
+            logger.debug(f"💾 State saved: {len(LINKS)} links")
+            return True
         except Exception as e:
-            logger.warning(f"Could not save state: {e}")
+            logger.error(f"❌ Could not save state: {e}")
+            return False
 
 async def make_link(
     label: str = "لینک جدید",
@@ -385,7 +414,7 @@ async def make_link(
                 ids = SUBS[sub_id].setdefault("link_ids", [])
                 if uid not in ids:
                     ids.append(uid)
-    asyncio.create_task(save_state())
+    await save_state()
     log_activity("link", f"مولتی کانفیگ «{LINKS[uid]['label']}» ساخته شد", "ok")
     return uid, LINKS[uid]
 
@@ -413,7 +442,7 @@ async def update_link(uid: str, updates: dict) -> dict | None:
         
         link["edited_at"] = datetime.now().isoformat()
         
-    asyncio.create_task(save_state())
+    await save_state()
     log_activity("link", f"کانفیگ «{link['label']}» ویرایش شد", "ok")
     return link
 
@@ -428,7 +457,7 @@ async def remove_link(uid: str) -> str | None:
             if sub_id in SUBS:
                 ids = SUBS[sub_id].get("link_ids", [])
                 if uid in ids: ids.remove(uid)
-    asyncio.create_task(save_state())
+    await save_state()
     log_activity("link", f"کانفیگ «{label}» حذف شد", "err")
     return label
 
@@ -441,7 +470,7 @@ async def remove_sub_group(sub_id: str) -> str | None:
         for link in LINKS.values():
             if link.get("sub_id") == sub_id:
                 link["sub_id"] = None
-    asyncio.create_task(save_state())
+    await save_state()
     log_activity("sub", f"گروه «{name}» حذف شد", "warn")
     return name
 
