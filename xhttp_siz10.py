@@ -12,7 +12,10 @@ from state import (
     LINKS, LINKS_LOCK, stats, connections, error_logs, logger,
     is_link_allowed, is_ip_allowed, save_state
 )
-from relay_protocols import parse_vless_header, parse_trojan_header, check_and_use
+from relay_protocols import (
+    parse_vless_header, parse_trojan_header, parse_vmess_header, 
+    parse_shadowsocks_header, check_and_use
+)
 from speed_limit import throttle
 
 router = APIRouter()
@@ -70,8 +73,12 @@ async def _open_tcp_tunnel(first_chunk: bytes, protocol: str, uuid: str):
         cmd, address, port, payload = await parse_vless_header(first_chunk)
     elif protocol == "trojan":
         cmd, address, port, payload = await parse_trojan_header(first_chunk, uuid)
+    elif protocol == "vmess":
+        cmd, address, port, payload = await parse_vmess_header(first_chunk, uuid)
+    elif protocol == "shadowsocks":
+        cmd, address, port, payload = await parse_shadowsocks_header(first_chunk)
     else:
-        raise ValueError("Unknown protocol")
+        raise ValueError(f"Unknown protocol: {protocol}")
 
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(address, port), timeout=TCP_CONNECT_TIMEOUT
@@ -166,11 +173,22 @@ def _downstream_gen(sess: dict):
         finally: pass
     return gen()
 
-# Route برای دانلود (Downlink) مشترک بین VLESS و Trojan
+# Route برای Downlink - پشتیبانی از تمام پروتکل‌ها
 @router.get("/xhttp-siz10/{mode}/{uuid}/{session_id}")
 @router.get("/xhttp-trojan/{mode}/{uuid}/{session_id}")
+@router.get("/xhttp-vmess/{mode}/{uuid}/{session_id}")
+@router.get("/xhttp-ss/{mode}/{uuid}/{session_id}")
 async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request):
-    protocol = "trojan" if "trojan" in request.url.path else "vless"
+    # تشخیص پروتکل از مسیر
+    path = request.url.path
+    if "trojan" in path:
+        protocol = "trojan"
+    elif "vmess" in path:
+        protocol = "vmess"
+    elif "ss" in path:
+        protocol = "shadowsocks"
+    else:
+        protocol = "vless"
     
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
@@ -184,11 +202,23 @@ async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request
     headers = _resp_headers()
     return StreamingResponse(_downstream_gen(sess), headers=headers, media_type=headers["content-type"])
 
-# Route برای آپلود (Uplink) مشترک
+# Route برای Uplink - پشتیبانی از تمام پروتکل‌ها
 @router.post("/xhttp-siz10/packet-up/{uuid}/{session_id}/{seq}")
 @router.post("/xhttp-trojan/packet-up/{uuid}/{session_id}/{seq}")
+@router.post("/xhttp-vmess/packet-up/{uuid}/{session_id}/{seq}")
+@router.post("/xhttp-ss/packet-up/{uuid}/{session_id}/{seq}")
 async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Request):
-    protocol = "trojan" if "trojan" in request.url.path else "vless"
+    # تشخیص پروتکل از مسیر
+    path = request.url.path
+    if "trojan" in path:
+        protocol = "trojan"
+    elif "vmess" in path:
+        protocol = "vmess"
+    elif "ss" in path:
+        protocol = "shadowsocks"
+    else:
+        protocol = "vless"
+        
     ip = request.client.host if request.client else "unknown"
     
     sess = await _get_or_create_session(uuid, "packet-up", session_id, ip, protocol)
@@ -240,3 +270,53 @@ async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Reques
         raise HTTPException(status_code=502, detail="write failed")
 
     return {"ok": True}
+
+# Route برای gRPC
+@router.post("/grpc/{uuid}/{session_id}")
+async def grpc_tunnel(uuid: str, session_id: str, request: Request):
+    """پشتیبانی از gRPC برای VLESS, Trojan, VMESS"""
+    # تشخیص پروتکل از هدر
+    protocol = request.headers.get("x-protocol", "vless")
+    ip = request.client.host if request.client else "unknown"
+    
+    async with LINKS_LOCK:
+        link = LINKS.get(uuid)
+    if not is_link_allowed(link):
+        raise HTTPException(status_code=403, detail="not authorized")
+    if not is_ip_allowed(link, uuid, ip):
+        raise HTTPException(status_code=403, detail="ip limit reached")
+    
+    body = await request.body()
+    if not body:
+        return {"ok": True}
+    
+    # برای gRPC، داده‌ها به صورت مستقیم به TCP ارسال می‌شوند
+    try:
+        if protocol == "vless":
+            cmd, addr, port, payload = await parse_vless_header(body)
+        elif protocol == "trojan":
+            cmd, addr, port, payload = await parse_trojan_header(body, uuid)
+        elif protocol == "vmess":
+            cmd, addr, port, payload = await parse_vmess_header(body, uuid)
+        else:
+            return {"ok": False, "error": "Unsupported protocol"}
+        
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(addr, port), timeout=TCP_CONNECT_TIMEOUT
+        )
+        _tune_socket(writer)
+        
+        if payload:
+            writer.write(payload)
+            await writer.drain()
+        
+        # ارسال پاسخ
+        response = await reader.read(8192)
+        writer.close()
+        await writer.wait_closed()
+        
+        return {"ok": True, "data": response.hex() if response else ""}
+        
+    except Exception as e:
+        logger.error(f"gRPC error: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
