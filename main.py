@@ -17,7 +17,10 @@ from state import (
     log_activity
 )
 from xhttp_siz10 import router as xhttp_router
-from relay_protocols import parse_vless_header, parse_trojan_header, check_and_use
+from relay_protocols import (
+    parse_vless_header, parse_trojan_header, parse_vmess_header,
+    parse_shadowsocks_header, check_and_use
+)
 from speed_limit import throttle
 from pages import DASHBOARD_HTML
 
@@ -113,18 +116,37 @@ async def render_sub(uid: str, request: Request):
     encoded = base64.b64encode(raw_text.encode('utf-8')).decode('utf-8')
     return PlainTextResponse(encoded)
 
+# ============================================================
+# WEBSOCKET - VLESS
+# ============================================================
 @app.websocket("/ws/{uuid}")
 async def vless_ws(websocket: WebSocket, uuid: str):
     await _handle_ws_tunnel(websocket, uuid, "vless")
 
+# ============================================================
+# WEBSOCKET - Trojan
+# ============================================================
 @app.websocket("/trojan-ws/{uuid}")
 async def trojan_ws(websocket: WebSocket, uuid: str):
     await _handle_ws_tunnel(websocket, uuid, "trojan")
 
+# ============================================================
+# WEBSOCKET - VMESS
+# ============================================================
 @app.websocket("/vmess-ws/{uuid}")
 async def vmess_ws(websocket: WebSocket, uuid: str):
     await _handle_ws_tunnel(websocket, uuid, "vmess")
 
+# ============================================================
+# WEBSOCKET - Shadowsocks (با هدر مخصوص)
+# ============================================================
+@app.websocket("/ss-ws/{uuid}")
+async def shadowsocks_ws(websocket: WebSocket, uuid: str):
+    await _handle_ws_tunnel(websocket, uuid, "shadowsocks")
+
+# ============================================================
+# هسته مرکزی تونل زنی وب سوکت
+# ============================================================
 async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
     await websocket.accept()
     link = LINKS.get(uuid)
@@ -149,6 +171,10 @@ async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
             cmd, addr, port, payload = await parse_vless_header(first_packet)
         elif protocol == "trojan":
             cmd, addr, port, payload = await parse_trojan_header(first_packet, uuid)
+        elif protocol == "vmess":
+            cmd, addr, port, payload = await parse_vmess_header(first_packet, uuid)
+        elif protocol == "shadowsocks":
+            cmd, addr, port, payload = await parse_shadowsocks_header(first_packet)
         else:
             cmd, addr, port, payload = 1, "1.1.1.1", 443, first_packet
             
@@ -168,7 +194,9 @@ async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
                     writer.write(data)
                     await writer.drain()
             except Exception: pass
-            finally: writer.close()
+            finally: 
+                try: writer.close()
+                except: pass
 
         async def tcp_to_ws():
             try:
@@ -180,7 +208,9 @@ async def _handle_ws_tunnel(websocket: WebSocket, uuid: str, protocol: str):
                     connections[conn_id]["bytes"] += len(data)
                     await websocket.send_bytes(data)
             except Exception: pass
-            finally: await websocket.close()
+            finally: 
+                try: await websocket.close()
+                except: pass
 
         await asyncio.gather(ws_to_tcp(), tcp_to_ws())
     except WebSocketDisconnect:
