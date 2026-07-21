@@ -86,10 +86,10 @@ SUBS_LOCK = asyncio.Lock()
 
 # پروتکل‌های پشتیبانی شده
 SUPPORTED_TRANSPORTS = (
-    "vless-ws", "vless-xhttp", "vless-grpc", "vless-quic",
+    "vless-ws", "vless-xhttp", "vless-grpc",
     "trojan-ws", "trojan-xhttp", "trojan-grpc",
     "vmess-ws", "vmess-xhttp", "vmess-grpc",
-    "shadowsocks", "shadowsocks-xhttp",
+    "shadowsocks", "shadowsocks-ws",
     "mtproto"
 )
 FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "random", "none")
@@ -173,100 +173,214 @@ def generate_protocol_link(
     remark: str,
     fingerprint: str = DEFAULT_FINGERPRINT,
     port: int = DEFAULT_PORT,
-    extra_params: dict = None
 ) -> str:
     fp = fingerprint if fingerprint in FINGERPRINTS else DEFAULT_FINGERPRINT
-    extra = extra_params or {}
     
+    # ============================================================
+    # SHADOWSOCKS
+    # ============================================================
     if protocol_type == "shadowsocks":
         import base64
         method = "chacha20-ietf-poly1305"
         credentials = f"{method}:{uuid}"
         encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
-        return f"ss://{encoded_creds}@{host}:{SS_PORT}#{quote(remark + ' [SS-AEAD]')}"
+        return f"ss://{encoded_creds}@{host}:{SS_PORT}#{quote(remark + ' [SS]')}"
     
-    elif protocol_type == "shadowsocks-xhttp":
-        import base64
-        method = "chacha20-ietf-poly1305"
-        credentials = f"{method}:{uuid}"
-        encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
-        return f"ss-xhttp://{encoded_creds}@{host}:{port}?path=/xhttp-ss/packet-up/{uuid}#{quote(remark + ' [SS-xHTTP]')}"
-        
+    # ============================================================
+    # VLESS - WebSocket
+    # ============================================================
     elif protocol_type == "vless-ws":
-        params = {"encryption": "none", "security": "tls", "type": "ws", "host": host, "path": f"/ws/{uuid}", "sni": host, "fp": fp, "alpn": "http/1.1"}
+        params = {
+            "encryption": "none", 
+            "security": "tls", 
+            "type": "ws", 
+            "host": host, 
+            "path": f"/ws/{uuid}", 
+            "sni": host, 
+            "fp": fp, 
+            "alpn": "http/1.1"
+        }
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-WS]')}"
-        
+    
+    # ============================================================
+    # VLESS - xHTTP (با مسیر xhttp-siz10)
+    # ============================================================
     elif protocol_type == "vless-xhttp":
-        params = {"encryption": "none", "security": "tls", "type": "xhttp", "mode": "packet-up", "host": host, "path": f"/xhttp-siz10/packet-up/{uuid}", "sni": host, "fp": fp, "alpn": "h2,http/1.1"}
+        params = {
+            "encryption": "none", 
+            "security": "tls", 
+            "type": "xhttp", 
+            "mode": "packet-up", 
+            "host": host, 
+            "path": f"/xhttp-siz10/packet-up/{uuid}", 
+            "sni": host, 
+            "fp": fp, 
+            "alpn": "h2,http/1.1"
+        }
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-xHTTP]')}"
     
+    # ============================================================
+    # VLESS - gRPC
+    # ============================================================
     elif protocol_type == "vless-grpc":
-        params = {"encryption": "none", "security": "tls", "type": "grpc", "serviceName": f"/grpc/{uuid}", "host": host, "sni": host, "fp": fp, "alpn": "h2"}
+        params = {
+            "encryption": "none", 
+            "security": "tls", 
+            "type": "grpc", 
+            "serviceName": f"grpc/{uuid}", 
+            "host": host, 
+            "sni": host, 
+            "fp": fp, 
+            "alpn": "h2"
+        }
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-gRPC]')}"
     
-    elif protocol_type == "vless-quic":
-        params = {"encryption": "none", "security": "tls", "type": "quic", "host": host, "sni": host, "fp": fp}
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-QUIC]')}"
-        
+    # ============================================================
+    # Trojan - WebSocket
+    # ============================================================
     elif protocol_type == "trojan-ws":
-        params = {"security": "tls", "type": "ws", "host": host, "path": f"/trojan-ws/{uuid}", "sni": host, "fp": fp, "alpn": "http/1.1"}
+        params = {
+            "security": "tls", 
+            "type": "ws", 
+            "host": host, 
+            "path": f"/trojan-ws/{uuid}", 
+            "sni": host, 
+            "fp": fp, 
+            "alpn": "http/1.1"
+        }
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-WS]')}"
-        
+    
+    # ============================================================
+    # Trojan - xHTTP
+    # ============================================================
     elif protocol_type == "trojan-xhttp":
-        params = {"security": "tls", "type": "xhttp", "mode": "packet-up", "host": host, "path": f"/xhttp-trojan/packet-up/{uuid}", "sni": host, "fp": fp, "alpn": "h2,http/1.1"}
+        params = {
+            "security": "tls", 
+            "type": "xhttp", 
+            "mode": "packet-up", 
+            "host": host, 
+            "path": f"/xhttp-trojan/packet-up/{uuid}", 
+            "sni": host, 
+            "fp": fp, 
+            "alpn": "h2,http/1.1"
+        }
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-xHTTP]')}"
     
+    # ============================================================
+    # Trojan - gRPC
+    # ============================================================
     elif protocol_type == "trojan-grpc":
-        params = {"security": "tls", "type": "grpc", "serviceName": f"/trojan-grpc/{uuid}", "host": host, "sni": host, "fp": fp, "alpn": "h2"}
+        params = {
+            "security": "tls", 
+            "type": "grpc", 
+            "serviceName": f"trojan-grpc/{uuid}", 
+            "host": host, 
+            "sni": host, 
+            "fp": fp, 
+            "alpn": "h2"
+        }
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
         return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-gRPC]')}"
-        
+    
+    # ============================================================
+    # VMESS - WebSocket
+    # ============================================================
     elif protocol_type == "vmess-ws":
         import base64
         import json
         vmess_obj = {
-            "v": "2", "ps": f"{remark} [VMESS-WS]",
-            "add": host, "port": port, "id": uuid,
-            "aid": "0", "net": "ws", "type": "none",
-            "host": host, "path": f"/vmess-ws/{uuid}",
-            "tls": "tls", "sni": host, "fp": fp
+            "v": "2", 
+            "ps": f"{remark} [VMESS-WS]",
+            "add": host, 
+            "port": port, 
+            "id": uuid,
+            "aid": "0", 
+            "net": "ws", 
+            "type": "none",
+            "host": host, 
+            "path": f"/vmess-ws/{uuid}",
+            "tls": "tls", 
+            "sni": host, 
+            "fp": fp
         }
         return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
     
+    # ============================================================
+    # VMESS - xHTTP
+    # ============================================================
     elif protocol_type == "vmess-xhttp":
         import base64
         import json
         vmess_obj = {
-            "v": "2", "ps": f"{remark} [VMESS-xHTTP]",
-            "add": host, "port": port, "id": uuid,
-            "aid": "0", "net": "xhttp", "type": "packet-up",
-            "host": host, "path": f"/xhttp-vmess/packet-up/{uuid}",
-            "tls": "tls", "sni": host, "fp": fp
+            "v": "2", 
+            "ps": f"{remark} [VMESS-xHTTP]",
+            "add": host, 
+            "port": port, 
+            "id": uuid,
+            "aid": "0", 
+            "net": "xhttp", 
+            "type": "packet-up",
+            "host": host, 
+            "path": f"/xhttp-vmess/packet-up/{uuid}",
+            "tls": "tls", 
+            "sni": host, 
+            "fp": fp
         }
         return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
     
+    # ============================================================
+    # VMESS - gRPC
+    # ============================================================
     elif protocol_type == "vmess-grpc":
         import base64
         import json
         vmess_obj = {
-            "v": "2", "ps": f"{remark} [VMESS-gRPC]",
-            "add": host, "port": port, "id": uuid,
-            "aid": "0", "net": "grpc", "type": "none",
-            "host": host, "path": f"/vmess-grpc/{uuid}",
-            "tls": "tls", "sni": host, "fp": fp
+            "v": "2", 
+            "ps": f"{remark} [VMESS-gRPC]",
+            "add": host, 
+            "port": port, 
+            "id": uuid,
+            "aid": "0", 
+            "net": "grpc", 
+            "type": "none",
+            "host": host, 
+            "path": f"/vmess-grpc/{uuid}",
+            "tls": "tls", 
+            "sni": host, 
+            "fp": fp
         }
         return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
     
+    # ============================================================
+    # MTProto (تلگرام)
+    # ============================================================
     elif protocol_type == "mtproto":
         import base64
         secret = base64.urlsafe_b64encode(uuid.encode()).decode().rstrip("=")
         return f"tg://proxy?server={host}&port={MTProto_PORT}&secret={secret}#{quote(remark + ' [MTProto]')}"
+    
+    # ============================================================
+    # Shadowsocks - WebSocket
+    # ============================================================
+    elif protocol_type == "shadowsocks-ws":
+        import base64
+        method = "chacha20-ietf-poly1305"
+        credentials = f"{method}:{uuid}"
+        encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
+        params = {
+            "security": "tls",
+            "type": "ws",
+            "host": host,
+            "path": f"/ss-ws/{uuid}",
+            "sni": host
+        }
+        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+        return f"ss://{encoded_creds}@{host}:{port}?{query}#{quote(remark + ' [SS-WS]')}"
         
     return ""
 
@@ -275,6 +389,7 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
     fp = link.get("fingerprint", DEFAULT_FINGERPRINT)
     port = link.get("port", DEFAULT_PORT)
     
+    # همه پروتکل‌های پشتیبانی شده
     protocols = [
         ("vless-ws", "VLESS-WS"),
         ("vless-xhttp", "VLESS-xHTTP"),
@@ -285,8 +400,8 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
         ("vmess-ws", "VMESS-WS"),
         ("vmess-xhttp", "VMESS-xHTTP"),
         ("vmess-grpc", "VMESS-gRPC"),
-        ("shadowsocks", "SS-AEAD"),
-        ("shadowsocks-xhttp", "SS-xHTTP"),
+        ("shadowsocks", "SS"),
+        ("shadowsocks-ws", "SS-WS"),
         ("mtproto", "MTProto")
     ]
     
@@ -296,13 +411,13 @@ def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
             link_str = generate_protocol_link(proto, uid, host, f"{remark} [{label}]", fp, port)
             if link_str:
                 links.append(link_str)
+                logger.debug(f"Generated {proto} link for {uid}")
         except Exception as e:
             logger.warning(f"Failed to generate {proto} link: {e}")
     
     return links
 
 async def load_state():
-    """بارگذاری وضعیت از فایل"""
     global LINKS, SUBS
     try:
         if DATA_FILE.exists():
@@ -322,7 +437,6 @@ async def load_state():
         await save_state()
 
 async def save_state():
-    """ذخیره وضعیت در فایل"""
     async with SAVE_LOCK:
         try:
             data = {
