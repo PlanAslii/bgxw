@@ -173,21 +173,26 @@ def _downstream_gen(sess: dict):
         finally: pass
     return gen()
 
+# ============================================================
+# DOWNLINK - پشتیبانی از همه پروتکل‌ها
+# ============================================================
 @router.get("/xhttp-siz10/{mode}/{uuid}/{session_id}")
+async def xhttp_vless_downlink(mode: str, uuid: str, session_id: str, request: Request):
+    return await _xhttp_downlink(mode, uuid, session_id, request, "vless")
+
 @router.get("/xhttp-trojan/{mode}/{uuid}/{session_id}")
+async def xhttp_trojan_downlink(mode: str, uuid: str, session_id: str, request: Request):
+    return await _xhttp_downlink(mode, uuid, session_id, request, "trojan")
+
 @router.get("/xhttp-vmess/{mode}/{uuid}/{session_id}")
+async def xhttp_vmess_downlink(mode: str, uuid: str, session_id: str, request: Request):
+    return await _xhttp_downlink(mode, uuid, session_id, request, "vmess")
+
 @router.get("/xhttp-ss/{mode}/{uuid}/{session_id}")
-async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request):
-    path = request.url.path
-    if "trojan" in path:
-        protocol = "trojan"
-    elif "vmess" in path:
-        protocol = "vmess"
-    elif "ss" in path:
-        protocol = "shadowsocks"
-    else:
-        protocol = "vless"
-    
+async def xhttp_ss_downlink(mode: str, uuid: str, session_id: str, request: Request):
+    return await _xhttp_downlink(mode, uuid, session_id, request, "shadowsocks")
+
+async def _xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request, protocol: str):
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
     if not is_link_allowed(link):
@@ -200,21 +205,26 @@ async def xhttp_downlink(mode: str, uuid: str, session_id: str, request: Request
     headers = _resp_headers()
     return StreamingResponse(_downstream_gen(sess), headers=headers, media_type=headers["content-type"])
 
+# ============================================================
+# UPLINK - پشتیبانی از همه پروتکل‌ها
+# ============================================================
 @router.post("/xhttp-siz10/packet-up/{uuid}/{session_id}/{seq}")
+async def xhttp_vless_upload(uuid: str, session_id: str, seq: int, request: Request):
+    return await _xhttp_upload(uuid, session_id, seq, request, "vless")
+
 @router.post("/xhttp-trojan/packet-up/{uuid}/{session_id}/{seq}")
+async def xhttp_trojan_upload(uuid: str, session_id: str, seq: int, request: Request):
+    return await _xhttp_upload(uuid, session_id, seq, request, "trojan")
+
 @router.post("/xhttp-vmess/packet-up/{uuid}/{session_id}/{seq}")
+async def xhttp_vmess_upload(uuid: str, session_id: str, seq: int, request: Request):
+    return await _xhttp_upload(uuid, session_id, seq, request, "vmess")
+
 @router.post("/xhttp-ss/packet-up/{uuid}/{session_id}/{seq}")
-async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Request):
-    path = request.url.path
-    if "trojan" in path:
-        protocol = "trojan"
-    elif "vmess" in path:
-        protocol = "vmess"
-    elif "ss" in path:
-        protocol = "shadowsocks"
-    else:
-        protocol = "vless"
-        
+async def xhttp_ss_upload(uuid: str, session_id: str, seq: int, request: Request):
+    return await _xhttp_upload(uuid, session_id, seq, request, "shadowsocks")
+
+async def _xhttp_upload(uuid: str, session_id: str, seq: int, request: Request, protocol: str):
     ip = request.client.host if request.client else "unknown"
     
     sess = await _get_or_create_session(uuid, "packet-up", session_id, ip, protocol)
@@ -267,6 +277,9 @@ async def packet_up_upload(uuid: str, session_id: str, seq: int, request: Reques
 
     return {"ok": True}
 
+# ============================================================
+# gRPC - پشتیبانی از همه پروتکل‌ها
+# ============================================================
 @router.post("/grpc/{uuid}/{session_id}")
 async def grpc_tunnel(uuid: str, session_id: str, request: Request):
     protocol = request.headers.get("x-protocol", "vless")
