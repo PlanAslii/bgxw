@@ -1,7 +1,9 @@
-# state.py
+#[state.py]
+# OXNET v1.1-beta core state
 import asyncio
 import json
 import os
+import base64
 import hashlib
 import secrets
 import time
@@ -15,18 +17,13 @@ from urllib.parse import quote
 import logging
 from fastapi import Request
 
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-
+# ── Logger Setup ──────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("OXNet-Core")
+logger = logging.getLogger("OXNET")
 
 IRAN_TZ = ZoneInfo("Asia/Tehran")
 
-# ========== DIRECTORY SETUP ==========
+# ── Smart Persistence Path ────────────
 env_data = os.environ.get("DATA_DIR")
 if env_data:
     DATA_DIR = Path(env_data)
@@ -47,20 +44,20 @@ DATA_FILE = DATA_DIR / "oxnet_state.json"
 SECRET_FILE = DATA_DIR / "oxnet_secret.key"
 SAVE_LOCK = asyncio.Lock()
 
-logger.info(f"Data directory: {DATA_DIR}")
-logger.info(f"Data file: {DATA_FILE}")
-
 def _load_or_create_secret() -> str:
     env_secret = os.environ.get("SECRET_KEY")
-    if env_secret: return env_secret
+    if env_secret:
+        return env_secret
     try:
         if SECRET_FILE.exists():
             existing = SECRET_FILE.read_text(encoding="utf-8").strip()
-            if existing: return existing
+            if existing:
+                return existing
         new_secret = secrets.token_urlsafe(32)
         SECRET_FILE.write_text(new_secret, encoding="utf-8")
         return new_secret
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Could not persist SECRET_KEY, sessions/password may reset on restart: {e}")
         return secrets.token_urlsafe(32)
 
 CONFIG = {
@@ -69,6 +66,14 @@ CONFIG = {
     "host": os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost"),
 }
 
+PANEL_NAME = "OXNET"
+PANEL_VERSION = "1.1-beta"
+BETA_ALL = os.environ.get("BETA_ALL", "1").strip().lower() not in ("0", "false", "no", "off")
+XHTTP_BASE_PATH = os.environ.get("XHTTP_BASE_PATH", "/xhttp-oxnet").strip() or "/xhttp-oxnet"
+if not XHTTP_BASE_PATH.startswith("/"):
+    XHTTP_BASE_PATH = "/" + XHTTP_BASE_PATH
+
+# ── Global State Variables ────────────────────────────────────────────────────
 connections: dict = {}
 stats = {
     "total_bytes": 0,
@@ -76,42 +81,60 @@ stats = {
     "total_errors": 0,
     "start_time": time.time(),
 }
-error_logs: deque = deque(maxlen=100)
+error_logs: deque = deque(maxlen=50)
 activity_logs: deque = deque(maxlen=200)
+hourly_traffic: dict = defaultdict(int)
+http_client = None
 
 LINKS: dict = {}
 LINKS_LOCK = asyncio.Lock()
 SUBS: dict = {}
 SUBS_LOCK = asyncio.Lock()
 
-# پروتکل‌های پشتیبانی شده
-SUPPORTED_TRANSPORTS = (
-    "vless-ws", "vless-xhttp", "vless-grpc",
-    "trojan-ws", "trojan-xhttp", "trojan-grpc",
-    "vmess-ws", "vmess-xhttp", "vmess-grpc",
-    "shadowsocks", "shadowsocks-ws",
-    "mtproto"
+PROTOCOLS = (
+    "multi-auto",
+    "vless-ws",
+    "vless-xhttp-packet-up",
+    "vless-xhttp-stream-up",
 )
-FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "random", "none")
+DEFAULT_PROTOCOL = "multi-auto"
+FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized")
 DEFAULT_FINGERPRINT = "chrome"
+DEFAULT_ALPN_BY_PROTOCOL = {
+    "multi-auto": "h2,http/1.1",
+    "vless-ws": "http/1.1",
+    "vless-xhttp-packet-up": "h2,http/1.1",
+    "vless-xhttp-stream-up": "h2,http/1.1",
+}
 DEFAULT_PORT = 443
-SS_PORT = int(os.environ.get("SS_PORT", 8388))
-MTProto_PORT = int(os.environ.get("MTPROTO_PORT", 4433))
+MIN_PORT, MAX_PORT = 1, 65535
+DEFAULT_SPEED_LIMIT = 0
 
-def get_system_stats():
-    stats = {"cpu": 0, "ram": 0, "ram_total": 0, "disk": 0}
-    if PSUTIL_AVAILABLE:
-        stats["cpu"] = psutil.cpu_percent(interval=0.1)
-        ram = psutil.virtual_memory()
-        stats["ram"] = ram.percent
-        stats["ram_total"] = ram.total
-        disk = psutil.disk_usage('/')
-        stats["disk"] = disk.percent
-    else:
-        try:
-            stats["cpu"] = round(os.getloadavg()[0] / os.cpu_count() * 100, 1)
-        except: pass
-    return stats
+def hash_password(pw: str) -> str:
+    return hashlib.sha256(f"{pw}{CONFIG['secret']}".encode()).hexdigest()
+
+AUTH = {"password_hash": hash_password(os.environ.get("ADMIN_PASSWORD", "OXNET"))}
+SESSIONS: dict = {}
+SESSIONS_LOCK = asyncio.Lock()
+SESSION_COOKIE = "oxnet_session"
+SESSION_TTL = 60 * 60 * 24 * 365
+
+# ── Helper Functions ──────────────────────────────────────────────────────────
+def now_ir() -> datetime:
+    return datetime.now(IRAN_TZ)
+
+def log_activity(kind: str, message: str, level: str = "info"):
+    activity_logs.append({
+        "kind": kind,
+        "level": level,
+        "message": message,
+        "time": datetime.now().isoformat(),
+    })
+
+def uptime() -> str:
+    secs = int(time.time() - stats["start_time"])
+    h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 def parse_size_to_bytes(value: float, unit: str) -> int:
     unit = unit.upper()
@@ -120,20 +143,34 @@ def parse_size_to_bytes(value: float, unit: str) -> int:
     if unit == "KB": return int(value * 1024)
     return int(value)
 
+def parse_speed_to_bytes(value: float, unit: str) -> int:
+    if value <= 0:
+        return 0
+    unit = (unit or "MBIT").upper()
+    if unit == "MBIT": return int(value * 1024 * 1024 / 8)
+    if unit == "KB": return int(value * 1024)
+    if unit == "MB": return int(value * 1024 * 1024)
+    return int(value)
+
 def is_link_expired(link: dict) -> bool:
     exp = link.get("expires_at")
-    if not exp: return False
+    if not exp:
+        return False
     try:
         return datetime.now() > datetime.fromisoformat(exp)
     except Exception:
         return False
 
 def is_link_allowed(link: dict | None) -> bool:
-    if link is None: return False
-    if not link.get("active", True): return False
-    if is_link_expired(link): return False
+    if link is None:
+        return False
+    if not link.get("active", True):
+        return False
+    if is_link_expired(link):
+        return False
     lb = link.get("limit_bytes", 0)
-    if lb > 0 and link.get("used_bytes", 0) >= lb: return False
+    if lb > 0 and link.get("used_bytes", 0) >= lb:
+        return False
     return True
 
 def fmt_bytes(b: int) -> str:
@@ -146,11 +183,14 @@ def unique_ips_for_uuid(uuid: str) -> set:
     return {c.get("ip") for c in connections.values() if c.get("uuid") == uuid and c.get("ip")}
 
 def is_ip_allowed(link: dict | None, uuid: str, ip: str) -> bool:
-    if link is None: return False
+    if link is None:
+        return False
     limit = int(link.get("ip_limit", 0) or 0)
-    if limit <= 0: return True
+    if limit <= 0:
+        return True
     ips = unique_ips_for_uuid(uuid)
-    if ip in ips: return True
+    if ip in ips:
+        return True
     return len(ips) < limit
 
 def get_host(request: Request | None = None) -> str:
@@ -166,275 +206,148 @@ def generate_uuid() -> str:
     h = secrets.token_hex(16)
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
-def generate_protocol_link(
-    protocol_type: str,
+
+def sanitize_path_slug(value: str | None, fallback: str) -> str:
+    """Return a safe single URL path segment for WS/XHTTP config paths."""
+    raw = (value or fallback or "").strip().strip("/")
+    raw = raw.split("/")[-1] if "/" in raw else raw
+    safe = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_", "."))
+    return (safe or fallback).strip("/")
+
+def link_path_key(uid: str, link: dict | None) -> str:
+    return sanitize_path_slug((link or {}).get("path_slug"), uid)
+
+def resolve_link_key(key: str) -> tuple[str | None, dict | None]:
+    """Resolve either a real UUID or a custom admin path slug to the stored link."""
+    if key in LINKS:
+        return key, LINKS.get(key)
+    for uid, link in LINKS.items():
+        if link_path_key(uid, link) == key:
+            return uid, link
+    return None, None
+
+def get_link_by_key(key: str) -> dict | None:
+    return resolve_link_key(key)[1]
+
+def is_path_slug_available(slug: str, current_uid: str | None = None) -> bool:
+    slug = sanitize_path_slug(slug, current_uid or slug)
+    for uid, link in LINKS.items():
+        if current_uid and uid == current_uid:
+            continue
+        if uid == slug or link_path_key(uid, link) == slug:
+            return False
+    return True
+
+def _path_for_protocol(protocol: str, uuid: str, link: dict | None = None) -> tuple[str, str, str]:
+    """Return client type, mode and path for the selected OXNET transport."""
+    path_key = link_path_key(uuid, link)
+    if "xhttp" in protocol:
+        mode = protocol.split("xhttp-", 1)[1]
+        return "xhttp", mode, f"{XHTTP_BASE_PATH}/{mode}/{path_key}"
+    return "ws", "", f"/ws/{path_key}"
+
+def _safe_port(port: int | None) -> int:
+    try:
+        port_val = int(port or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        port_val = DEFAULT_PORT
+    return port_val if (MIN_PORT <= port_val <= MAX_PORT) else DEFAULT_PORT
+
+def _safe_fp(fingerprint: str | None) -> str:
+    fp = (fingerprint or DEFAULT_FINGERPRINT).strip().lower() or DEFAULT_FINGERPRINT
+    return fp if fp in FINGERPRINTS else DEFAULT_FINGERPRINT
+
+def _alpn_for(protocol: str, alpn: str | None) -> str:
+    return (alpn or "").strip() or DEFAULT_ALPN_BY_PROTOCOL.get(protocol, "http/1.1")
+
+def generate_vless_link(
     uuid: str,
     host: str,
-    remark: str,
-    fingerprint: str = DEFAULT_FINGERPRINT,
-    port: int = DEFAULT_PORT,
+    remark: str = "OXNET",
+    protocol: str = DEFAULT_PROTOCOL,
+    fingerprint: str | None = None,
+    alpn: str | None = None,
+    port: int | None = None,
+    path_slug: str | None = None,
 ) -> str:
-    fp = fingerprint if fingerprint in FINGERPRINTS else DEFAULT_FINGERPRINT
-    
-    # ============================================================
-    # SHADOWSOCKS
-    # ============================================================
-    if protocol_type == "shadowsocks":
-        import base64
-        method = "chacha20-ietf-poly1305"
-        credentials = f"{method}:{uuid}"
-        encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
-        return f"ss://{encoded_creds}@{host}:{SS_PORT}#{quote(remark + ' [SS]')}"
-    
-    # ============================================================
-    # VLESS - WebSocket
-    # ============================================================
-    elif protocol_type == "vless-ws":
-        params = {
-            "encryption": "none", 
-            "security": "tls", 
-            "type": "ws", 
-            "host": host, 
-            "path": f"/ws/{uuid}", 
-            "sni": host, 
-            "fp": fp, 
-            "alpn": "http/1.1"
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-WS]')}"
-    
-    # ============================================================
-    # VLESS - xHTTP (با مسیر xhttp-siz10)
-    # ============================================================
-    elif protocol_type == "vless-xhttp":
-        params = {
-            "encryption": "none", 
-            "security": "tls", 
-            "type": "xhttp", 
-            "mode": "packet-up", 
-            "host": host, 
-            "path": f"/xhttp-siz10/packet-up/{uuid}", 
-            "sni": host, 
-            "fp": fp, 
-            "alpn": "h2,http/1.1"
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-xHTTP]')}"
-    
-    # ============================================================
-    # VLESS - gRPC
-    # ============================================================
-    elif protocol_type == "vless-grpc":
-        params = {
-            "encryption": "none", 
-            "security": "tls", 
-            "type": "grpc", 
-            "serviceName": f"grpc/{uuid}", 
-            "host": host, 
-            "sni": host, 
-            "fp": fp, 
-            "alpn": "h2"
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"vless://{uuid}@{host}:{port}?{query}#{quote(remark + ' [VLESS-gRPC]')}"
-    
-    # ============================================================
-    # Trojan - WebSocket
-    # ============================================================
-    elif protocol_type == "trojan-ws":
-        params = {
-            "security": "tls", 
-            "type": "ws", 
-            "host": host, 
-            "path": f"/trojan-ws/{uuid}", 
-            "sni": host, 
-            "fp": fp, 
-            "alpn": "http/1.1"
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-WS]')}"
-    
-    # ============================================================
-    # Trojan - xHTTP
-    # ============================================================
-    elif protocol_type == "trojan-xhttp":
-        params = {
-            "security": "tls", 
-            "type": "xhttp", 
-            "mode": "packet-up", 
-            "host": host, 
-            "path": f"/xhttp-trojan/packet-up/{uuid}", 
-            "sni": host, 
-            "fp": fp, 
-            "alpn": "h2,http/1.1"
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-xHTTP]')}"
-    
-    # ============================================================
-    # Trojan - gRPC
-    # ============================================================
-    elif protocol_type == "trojan-grpc":
-        params = {
-            "security": "tls", 
-            "type": "grpc", 
-            "serviceName": f"trojan-grpc/{uuid}", 
-            "host": host, 
-            "sni": host, 
-            "fp": fp, 
-            "alpn": "h2"
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"trojan://{uuid}@{host}:{port}?{query}#{quote(remark + ' [Trojan-gRPC]')}"
-    
-    # ============================================================
-    # VMESS - WebSocket
-    # ============================================================
-    elif protocol_type == "vmess-ws":
-        import base64
-        import json
-        vmess_obj = {
-            "v": "2", 
-            "ps": f"{remark} [VMESS-WS]",
-            "add": host, 
-            "port": port, 
-            "id": uuid,
-            "aid": "0", 
-            "net": "ws", 
-            "type": "none",
-            "host": host, 
-            "path": f"/vmess-ws/{uuid}",
-            "tls": "tls", 
-            "sni": host, 
-            "fp": fp
-        }
-        return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
-    
-    # ============================================================
-    # VMESS - xHTTP
-    # ============================================================
-    elif protocol_type == "vmess-xhttp":
-        import base64
-        import json
-        vmess_obj = {
-            "v": "2", 
-            "ps": f"{remark} [VMESS-xHTTP]",
-            "add": host, 
-            "port": port, 
-            "id": uuid,
-            "aid": "0", 
-            "net": "xhttp", 
-            "type": "packet-up",
-            "host": host, 
-            "path": f"/xhttp-vmess/packet-up/{uuid}",
-            "tls": "tls", 
-            "sni": host, 
-            "fp": fp
-        }
-        return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
-    
-    # ============================================================
-    # VMESS - gRPC
-    # ============================================================
-    elif protocol_type == "vmess-grpc":
-        import base64
-        import json
-        vmess_obj = {
-            "v": "2", 
-            "ps": f"{remark} [VMESS-gRPC]",
-            "add": host, 
-            "port": port, 
-            "id": uuid,
-            "aid": "0", 
-            "net": "grpc", 
-            "type": "none",
-            "host": host, 
-            "path": f"/vmess-grpc/{uuid}",
-            "tls": "tls", 
-            "sni": host, 
-            "fp": fp
-        }
-        return f"vmess://{base64.b64encode(json.dumps(vmess_obj).encode()).decode()}"
-    
-    # ============================================================
-    # MTProto (تلگرام)
-    # ============================================================
-    elif protocol_type == "mtproto":
-        import base64
-        secret = base64.urlsafe_b64encode(uuid.encode()).decode().rstrip("=")
-        return f"tg://proxy?server={host}&port={MTProto_PORT}&secret={secret}#{quote(remark + ' [MTProto]')}"
-    
-    # ============================================================
-    # Shadowsocks - WebSocket
-    # ============================================================
-    elif protocol_type == "shadowsocks-ws":
-        import base64
-        method = "chacha20-ietf-poly1305"
-        credentials = f"{method}:{uuid}"
-        encoded_creds = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
-        params = {
-            "security": "tls",
-            "type": "ws",
-            "host": host,
-            "path": f"/ss-ws/{uuid}",
-            "sni": host
-        }
-        query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        return f"ss://{encoded_creds}@{host}:{port}?{query}#{quote(remark + ' [SS-WS]')}"
-        
-    return ""
+    """Generate a VLESS link where the user id stays UUID and only the transport path is editable."""
+    if protocol == "multi-auto":
+        protocol = "vless-ws"
+    if protocol.startswith("vless-") is False:
+        protocol = "vless-ws"
+    fp = _safe_fp(fingerprint)
+    alpn_val = _alpn_for(protocol, alpn)
+    port_val = _safe_port(port)
+    typ, mode, path = _path_for_protocol(protocol, uuid, {"path_slug": path_slug or uuid})
+    params = {
+        "encryption": "none",
+        "security": "tls",
+        "type": typ,
+        "host": host,
+        "path": path,
+        "sni": host,
+        "fp": fp,
+        "alpn": alpn_val,
+    }
+    if typ == "xhttp":
+        params["mode"] = mode
+    query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items() if v != "")
+    return f"vless://{uuid}@{host}:{port_val}?{query}#{quote(remark)}"
 
-def get_all_links_for_uuid(link: dict, uid: str, host: str) -> list:
-    remark = f"OXNet-{link.get('label', '')}"
-    fp = link.get("fingerprint", DEFAULT_FINGERPRINT)
-    port = link.get("port", DEFAULT_PORT)
-    
-    # همه پروتکل‌های پشتیبانی شده
-    protocols = [
-        ("vless-ws", "VLESS-WS"),
-        ("vless-xhttp", "VLESS-xHTTP"),
-        ("vless-grpc", "VLESS-gRPC"),
-        ("trojan-ws", "Trojan-WS"),
-        ("trojan-xhttp", "Trojan-xHTTP"),
-        ("trojan-grpc", "Trojan-gRPC"),
-        ("vmess-ws", "VMESS-WS"),
-        ("vmess-xhttp", "VMESS-xHTTP"),
-        ("vmess-grpc", "VMESS-gRPC"),
-        ("shadowsocks", "SS"),
-        ("shadowsocks-ws", "SS-WS"),
-        ("mtproto", "MTProto")
-    ]
-    
-    links = []
-    for proto, label in protocols:
-        try:
-            link_str = generate_protocol_link(proto, uid, host, f"{remark} [{label}]", fp, port)
-            if link_str:
-                links.append(link_str)
-                logger.debug(f"Generated {proto} link for {uid}")
-        except Exception as e:
-            logger.warning(f"Failed to generate {proto} link: {e}")
-    
-    return links
+def links_for_link(link: dict, uid: str, host: str) -> list[str]:
+    """Generate only working OXNET outputs: VLESS WS and/or VLESS XHTTP."""
+    proto = link.get("protocol", DEFAULT_PROTOCOL)
+    remark = link.get("label") or "OXNET"
+    fp = link.get("fingerprint") or DEFAULT_FINGERPRINT
+    alpn = link.get("alpn") or ""
+    port = link.get("port") or DEFAULT_PORT
+    path_key = link_path_key(uid, link)
+    if proto == "multi-auto":
+        return [
+            generate_vless_link(uid, host, f"{remark}-VLESS-WS", "vless-ws", fp, alpn, port, path_key),
+            generate_vless_link(uid, host, f"{remark}-VLESS-XHTTP", "vless-xhttp-packet-up", fp, alpn, port, path_key),
+        ]
+    if proto.startswith("vless-"):
+        return [generate_vless_link(uid, host, remark, proto, fp, alpn, port, path_key)]
+    return [generate_vless_link(uid, host, remark, "vless-ws", fp, alpn, port, path_key)]
+
+def vless_link_for_link(link: dict, uid: str, host: str) -> str:
+    # Backward-compatible name: returns the first generated OXNET config.
+    return links_for_link(link, uid, host)[0]
+
+def primary_link_for_link(link: dict, uid: str, host: str) -> str:
+    return links_for_link(link, uid, host)[0]
+
+def subscription_text_for_link(link: dict, uid: str, host: str) -> str:
+    return "\n".join(links_for_link(link, uid, host))
+
+def client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else "نامشخص"
 
 async def load_state():
-    global LINKS, SUBS
     try:
         if DATA_FILE.exists():
             async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = await f.read()
             data = json.loads(raw)
-            
             LINKS.update(data.get("links", {}))
+            # v1.1 beta migration: every existing and future config is beta-enabled.
+            for uid, link in LINKS.items():
+                link.setdefault("path_slug", uid)
+                if BETA_ALL:
+                    link["beta"] = True
             SUBS.update(data.get("subs", {}))
-            
-            logger.info(f"✅ State loaded: {len(LINKS)} links, {len(SUBS)} subs")
-        else:
-            logger.warning("⚠️ No state file found. Starting fresh.")
-            await save_state()
+            if "password_hash" in data:
+                AUTH["password_hash"] = data["password_hash"]
+            logger.info(f"State loaded: {len(LINKS)} links, {len(SUBS)} subs")
     except Exception as e:
-        logger.error(f"❌ Could not load state: {e}")
-        await save_state()
+        logger.warning(f"Could not load state: {e}")
 
 async def save_state():
     async with SAVE_LOCK:
@@ -442,21 +355,49 @@ async def save_state():
             data = {
                 "links": dict(LINKS),
                 "subs": dict(SUBS),
+                "password_hash": AUTH["password_hash"],
                 "saved_at": datetime.now().isoformat(),
             }
-            
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            
             tmp = DATA_FILE.with_suffix(".tmp")
             async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, ensure_ascii=False, indent=2))
             tmp.replace(DATA_FILE)
-            
-            logger.debug(f"💾 State saved: {len(LINKS)} links")
-            return True
         except Exception as e:
-            logger.error(f"❌ Could not save state: {e}")
-            return False
+            logger.warning(f"Could not save state: {e}")
+
+_default_link_created = False
+
+async def ensure_default_link():
+    global _default_link_created
+    if _default_link_created:
+        return
+    async with LINKS_LOCK:
+        if not any(l.get("is_default") for l in LINKS.values()):
+            uid = hashlib.sha256(f"default{CONFIG['secret']}".encode()).hexdigest()
+            uid = f"{uid[:8]}-{uid[8:12]}-{uid[12:16]}-{uid[16:20]}-{uid[20:32]}"
+            if uid not in LINKS:
+                LINKS[uid] = {
+                    "label": "لینک پیش‌فرض",
+                    "limit_bytes": 0,
+                    "used_bytes": 0,
+                    "created_at": datetime.now().isoformat(),
+                    "active": True,
+                    "expires_at": None,
+                    "note": "",
+                    "is_default": True,
+                    "sub_id": None,
+                    "protocol": DEFAULT_PROTOCOL,
+                    "fingerprint": DEFAULT_FINGERPRINT,
+                    "alpn": "",
+                    "port": DEFAULT_PORT,
+                    "ip_limit": 0,
+                    "speed_limit_bytes": DEFAULT_SPEED_LIMIT,
+                    "secret": uid.replace("-", ""),
+                    "path_slug": uid,
+                    "beta": True,
+                }
+                asyncio.create_task(save_state())
+        _default_link_created = True
 
 async def make_link(
     label: str = "لینک جدید",
@@ -464,13 +405,26 @@ async def make_link(
     expires_at: str | None = None,
     note: str = "",
     sub_id: str | None = None,
+    protocol: str = DEFAULT_PROTOCOL,
     fingerprint: str = DEFAULT_FINGERPRINT,
+    alpn: str = "",
     port: int = DEFAULT_PORT,
     ip_limit: int = 0,
     speed_limit_bytes: int = 0,
+    path_slug: str | None = None,
 ) -> tuple[str, dict]:
+    if protocol not in PROTOCOLS:
+        protocol = DEFAULT_PROTOCOL
+    fingerprint = (fingerprint or DEFAULT_FINGERPRINT).strip().lower()
+    if fingerprint not in FINGERPRINTS:
+        fingerprint = DEFAULT_FINGERPRINT
+    if not (MIN_PORT <= port <= MAX_PORT):
+        port = DEFAULT_PORT
     uid = generate_uuid()
+    path_slug = sanitize_path_slug(path_slug, uid)
     async with LINKS_LOCK:
+        if not is_path_slug_available(path_slug):
+            path_slug = uid
         LINKS[uid] = {
             "label": (label or "لینک جدید").strip()[:60] or "لینک جدید",
             "limit_bytes": max(0, limit_bytes),
@@ -479,12 +433,17 @@ async def make_link(
             "active": True,
             "expires_at": expires_at,
             "note": (note or "").strip()[:200],
+            "is_default": False,
             "sub_id": sub_id,
+            "protocol": protocol,
             "fingerprint": fingerprint,
+            "alpn": (alpn or "").strip()[:100],
             "port": port,
             "ip_limit": max(0, ip_limit),
             "speed_limit_bytes": max(0, speed_limit_bytes),
-            "edited_at": datetime.now().isoformat(),
+            "secret": uid.replace("-", ""),
+            "path_slug": path_slug,
+            "beta": True,
         }
     if sub_id:
         async with SUBS_LOCK:
@@ -492,41 +451,14 @@ async def make_link(
                 ids = SUBS[sub_id].setdefault("link_ids", [])
                 if uid not in ids:
                     ids.append(uid)
-    await save_state()
-    log_activity("link", f"مولتی کانفیگ «{LINKS[uid]['label']}» ساخته شد", "ok")
+    asyncio.create_task(save_state())
+    log_activity("link", f"کانفیگ «{LINKS[uid]['label']}» ساخته شد", "ok")
     return uid, LINKS[uid]
-
-async def update_link(uid: str, updates: dict) -> dict | None:
-    async with LINKS_LOCK:
-        if uid not in LINKS:
-            return None
-        link = LINKS[uid]
-        
-        editable_fields = [
-            "label", "limit_bytes", "expires_at", "note", 
-            "fingerprint", "port", "ip_limit", "speed_limit_bytes", "active"
-        ]
-        
-        for field in editable_fields:
-            if field in updates and updates[field] is not None:
-                if field == "limit_bytes":
-                    link[field] = max(0, int(updates[field]))
-                elif field in ["ip_limit", "port", "speed_limit_bytes"]:
-                    link[field] = max(0, int(updates[field]))
-                elif field == "active":
-                    link[field] = bool(updates[field])
-                else:
-                    link[field] = updates[field]
-        
-        link["edited_at"] = datetime.now().isoformat()
-        
-    await save_state()
-    log_activity("link", f"کانفیگ «{link['label']}» ویرایش شد", "ok")
-    return link
 
 async def remove_link(uid: str) -> str | None:
     async with LINKS_LOCK:
-        if uid not in LINKS: return None
+        if uid not in LINKS:
+            return None
         label = LINKS[uid].get("label", uid)
         sub_id = LINKS[uid].get("sub_id")
         del LINKS[uid]
@@ -534,28 +466,77 @@ async def remove_link(uid: str) -> str | None:
         async with SUBS_LOCK:
             if sub_id in SUBS:
                 ids = SUBS[sub_id].get("link_ids", [])
-                if uid in ids: ids.remove(uid)
-    await save_state()
+                if uid in ids:
+                    ids.remove(uid)
+    asyncio.create_task(save_state())
     log_activity("link", f"کانفیگ «{label}» حذف شد", "err")
     return label
 
+async def set_link_active(uid: str, active: bool) -> dict | None:
+    async with LINKS_LOCK:
+        if uid not in LINKS:
+            return None
+        LINKS[uid]["active"] = bool(active)
+        label = LINKS[uid]["label"]
+    log_activity("link", f"کانفیگ «{label}» {'فعال' if active else 'غیرفعال'} شد", "ok" if active else "warn")
+    asyncio.create_task(save_state())
+    return LINKS[uid]
+
+async def create_sub_group(name: str = "گروه جدید", desc: str = "", password: str = "") -> tuple[str, dict]:
+    name = (name or "گروه جدید").strip()[:60]
+    desc = (desc or "").strip()[:200]
+    password = (password or "").strip()
+    sub_id = generate_uuid()
+    uuid_key = secrets.token_urlsafe(16)
+    async with SUBS_LOCK:
+        SUBS[sub_id] = {
+            "name": name,
+            "desc": desc,
+            "password_hash": hash_password(password) if password else None,
+            "uuid_key": uuid_key,
+            "created_at": datetime.now().isoformat(),
+            "link_ids": [],
+        }
+    asyncio.create_task(save_state())
+    log_activity("sub", f"گروه «{name}» ساخته شد", "ok")
+    return sub_id, SUBS[sub_id]
+
+async def set_link_sub(uid: str, sub_id: str | None) -> bool:
+    async with LINKS_LOCK:
+        if uid not in LINKS:
+            return False
+        old_sub = LINKS[uid].get("sub_id")
+        label = LINKS[uid].get("label", uid)
+    if sub_id is not None:
+        async with SUBS_LOCK:
+            if sub_id not in SUBS:
+                return False
+    async with SUBS_LOCK:
+        if old_sub and old_sub in SUBS:
+            ids = SUBS[old_sub].get("link_ids", [])
+            if uid in ids:
+                ids.remove(uid)
+        if sub_id and sub_id in SUBS:
+            ids = SUBS[sub_id].setdefault("link_ids", [])
+            if uid not in ids:
+                ids.append(uid)
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            LINKS[uid]["sub_id"] = sub_id
+    asyncio.create_task(save_state())
+    log_activity("link", f"کانفیگ «{label}» {'به گروه اضافه شد' if sub_id else 'از گروه خارج شد'}", "info")
+    return True
+
 async def remove_sub_group(sub_id: str) -> str | None:
     async with SUBS_LOCK:
-        if sub_id not in SUBS: return None
+        if sub_id not in SUBS:
+            return None
         name = SUBS[sub_id].get("name", sub_id)
         del SUBS[sub_id]
     async with LINKS_LOCK:
         for link in LINKS.values():
             if link.get("sub_id") == sub_id:
                 link["sub_id"] = None
-    await save_state()
+    asyncio.create_task(save_state())
     log_activity("sub", f"گروه «{name}» حذف شد", "warn")
     return name
-
-def log_activity(category: str, message: str, level: str = "info"):
-    activity_logs.append({
-        "time": datetime.now().isoformat(),
-        "category": category,
-        "message": message,
-        "level": level
-    })
